@@ -368,6 +368,12 @@ Public Class MainForm
     Private Sub HandleKeyDown(sender As Object, e As KeyEventArgs)
         If Not _enabled Then Return
 
+        ' Shift + phím bất kỳ thường là đang select → flush buffer
+        If e.Shift AndAlso _buf.Length > 0 Then
+            FlushBuffer(True)
+            Return
+        End If
+
         If e.Control AndAlso e.KeyCode = Keys.Q Then
             _hook.Stop()
             trayIcon.Visible = False
@@ -377,12 +383,15 @@ Public Class MainForm
 
         Select Case e.KeyCode
             Case Keys.Back
-                e.Handled = True
                 If _buf.Length > 0 Then
+                    ' Buffer có chữ: chặn Backspace gốc, tự xóa ký tự cuối trong buffer
+                    e.Handled = True
                     _buf.Remove(_buf.Length - 1, 1)
                     _lastToneKey = Chr(0)
                     DeleteChars(1)
                 Else
+                    ' Buffer rỗng: để Backspace gốc tự xử lý, KHÔNG gọi DeleteChars
+                    ' tránh double-delete do SendInput cũng pass qua LLKHF_INJECTED
                     e.Handled = False
                 End If
 
@@ -450,9 +459,11 @@ Public Class MainForm
 
             If _lastToneKey <> Chr(0) AndAlso HasTone(syllable) Then
                 If toneKey = _lastToneKey Then
-                    converted = StripTone(syllable)
+                    ' Bỏ dấu: khôi phục chữ gốc + append tone key để ra "as", "is", "aj"...
+                    converted = StripTone(syllable) & toneKey.ToString()
                     _lastToneKey = Chr(0)
                 Else
+                    ' Đổi sang dấu khác
                     Dim stripped As String = StripTone(syllable)
                     Dim result As String = ApplyTone(stripped, toneKey)
                     If result IsNot Nothing Then
@@ -509,8 +520,79 @@ Public Class MainForm
         Return sb.ToString()
     End Function
 
+    ' ── Phụ âm cuối hợp lệ trong tiếng Việt ──────────────────────────────
+    ' Chỉ: c, ch, m, n, ng, nh, p, t + nguyên âm (hoặc rỗng)
+    Private ReadOnly ValidFinalConsonants As New HashSet(Of String)(
+        New String() {"c", "ch", "m", "n", "ng", "nh", "p", "t"})
+
+    ' ── Phụ âm đầu hợp lệ ────────────────────────────────────────────────
+    Private ReadOnly ValidInitialConsonants As New HashSet(Of String)(
+        New String() {
+            "", "b", "c", "ch", "d", "đ", "g", "gh", "gi", "h",
+            "k", "kh", "l", "m", "n", "ng", "ngh", "nh", "p", "ph",
+            "qu", "r", "s", "t", "th", "tr", "v", "x"})
+
+    ''' <summary>
+    ''' Kiểm tra âm tiết có cấu trúc tiếng Việt hợp lệ không.
+    ''' Tách: [phụ âm đầu] + [nhóm nguyên âm] + [phụ âm cuối]
+    ''' Nếu không hợp lệ → không áp dấu, trả về ký tự gốc cho app.
+    ''' </summary>
+    Private Function IsValidVietnameseSyllable(syllable As String) As Boolean
+        If String.IsNullOrEmpty(syllable) Then Return False
+        Dim s As String = syllable.ToLowerInvariant()
+
+        ' Tách phụ âm đầu (greedy, dài nhất trước)
+        Dim initial As String = ""
+        Dim rest As String = s
+        For Each ic As String In New String() {"ngh", "gh", "gi", "ch", "kh", "ng", "nh", "ph", "th", "tr", "qu"}
+            If s.StartsWith(ic) Then
+                initial = ic
+                rest = s.Substring(ic.Length)
+                Exit For
+            End If
+        Next
+        If initial = "" Then
+            ' thử phụ âm đơn
+            If rest.Length > 0 AndAlso Not IsVowelChar(rest(0)) Then
+                initial = rest(0).ToString()
+                rest = rest.Substring(1)
+            End If
+        End If
+
+        ' Sau khi tách phụ âm đầu, phải còn nguyên âm
+        If String.IsNullOrEmpty(rest) Then Return False
+        If Not IsVowelChar(rest(0)) Then Return False
+
+        ' Tách nhóm nguyên âm
+        Dim vowelPart As New System.Text.StringBuilder()
+        Dim idx As Integer = 0
+        While idx < rest.Length AndAlso IsVowelChar(rest(idx))
+            vowelPart.Append(rest(idx))
+            idx += 1
+        End While
+        If vowelPart.Length = 0 Then Return False
+
+        ' Phần còn lại là phụ âm cuối
+        Dim finalPart As String = rest.Substring(idx)
+
+        ' Phụ âm cuối phải rỗng hoặc hợp lệ
+        If finalPart = "" Then Return True
+        If ValidFinalConsonants.Contains(finalPart) Then Return True
+
+        ' Cho phép phụ âm cuối chưa hoàn chỉnh (đang gõ dở: "ban" chưa gõ xong)
+        ' Kiểm tra xem có phải prefix của phụ âm cuối hợp lệ không
+        For Each fc As String In ValidFinalConsonants
+            If fc.StartsWith(finalPart) Then Return True
+        Next
+
+        Return False
+    End Function
+
     Private Function ApplyTone(syllable As String, toneKey As Char) As String
         If String.IsNullOrEmpty(syllable) Then Return Nothing
+        ' Chỉ validate khi chưa có dấu — nếu đã có dấu thì đang toggle, cho phép strip
+        Dim alreadyToned As Boolean = HasTone(syllable)
+        If Not alreadyToned AndAlso Not IsValidVietnameseSyllable(syllable) Then Return Nothing
         Dim tp As Integer = FindTonePosition(syllable.ToLowerInvariant())
         If tp < 0 Then Return Nothing
         Dim lc As Char = syllable.ToLowerInvariant()(tp)
