@@ -37,7 +37,7 @@ if "!VBC!"=="" (
 echo [INFO] Dung compiler: !VBC!
 
 "!VBC!" ^
-/target:exe ^
+/target:winexe ^
 /optionstrict+ ^
 /utf8output ^
 /r:System.dll ^

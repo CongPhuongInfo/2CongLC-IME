@@ -60,6 +60,8 @@ Public Class GlobalHook
         RCONTROL = &HA3
         LALT = &HA4
         RALT = &HA5
+        LWIN = &H5B
+        RWIN = &H5C
     End Enum
     Enum WH As Integer
 
@@ -303,8 +305,14 @@ Public Class GlobalHook
             Dim control As Boolean = ((GetKeyState(VK.LCONTROL) And &H80) <> 0) OrElse ((GetKeyState(VK.RCONTROL) And &H80) <> 0)
             Dim shift As Boolean = ((GetKeyState(VK.LSHIFT) And &H80) <> 0) OrElse ((GetKeyState(VK.RSHIFT) And &H80) <> 0)
             Dim alt As Boolean = ((GetKeyState(VK.LALT) And &H80) <> 0) OrElse ((GetKeyState(VK.RALT) And &H80) <> 0)
+            Dim win As Boolean = ((GetKeyState(VK.LWIN) And &H80) <> 0) OrElse ((GetKeyState(VK.RWIN) And &H80) <> 0)
             Dim capslock As Boolean = (GetKeyState(VK.CAPITAL) <> 0)
-            Dim e As New KeyEventArgs(DirectCast(KHS.vkCode Or (If(control, CInt(Keys.Control), 0)) Or (If(shift, CInt(Keys.Shift), 0)) Or (If(alt, CInt(Keys.Alt), 0)), Keys))
+            Dim modifiers As Keys = (If(control, Keys.Control, Keys.None)) Or
+                                    (If(shift, Keys.Shift, Keys.None)) Or
+                                    (If(alt, Keys.Alt, Keys.None))
+            Dim e As New KeyEventArgs(DirectCast(KHS.vkCode, Keys) Or modifiers)
+            ' Truyền trạng thái Win key qua Tag (KeyEventArgs không có slot cho Win key)
+            e.SuppressKeyPress = win  ' tái dụng field SuppressKeyPress để báo Win key
             Select Case wParam
                 Case WM.KEYDOWN, WM.SYSKEYDOWN
                     If events("KeyDown") IsNot Nothing Then
@@ -319,22 +327,27 @@ Public Class GlobalHook
                     End If
                     Exit Select
             End Select
-            If wParam = WM.KEYDOWN AndAlso Not handled AndAlso Not e.SuppressKeyPress AndAlso events("KeyPress") IsNot Nothing Then
+            ' Chỉ fire KeyPress khi: không bị handled, không có Win key, không có Ctrl/Alt combo
+            If wParam = WM.KEYDOWN AndAlso Not handled AndAlso Not win AndAlso
+               Not (control AndAlso alt = False AndAlso KHS.vkCode <> VK.SPACE) = False AndAlso
+               Not control AndAlso Not alt AndAlso
+               events("KeyPress") IsNot Nothing Then
 
                 Dim keyState As Byte() = New Byte(255) {}
-                Dim inBuffer As Byte() = New Byte(1) {}
                 GetKeyboardState(keyState)
-
-                If ToAscii(KHS.vkCode, KHS.scanCode, keyState, inBuffer, KHS.flags) = 1 Then
-
-                    Dim key As Char = CChar(ChrW(inBuffer(0)))
-                    If (capslock Xor shift) AndAlso Char.IsLetter(key) Then
-                        key = Char.ToUpper(key)
-                    End If
+                ' Dùng buffer 2 ký tự để ToUnicode có chỗ ghi surrogate pair
+                Dim pwszBuff As String = New String(Chr(0), 2)
+                Dim res As Integer = ToUnicode(KHS.vkCode, KHS.scanCode, keyState, pwszBuff, 2, 0)
+                If res = 1 Then
+                    Dim key As Char = pwszBuff(0)
+                    ' ToUnicode đã tính CapsLock+Shift, không cần tính lại
                     Dim e2 As New KeyPressEventArgs(key)
                     RaiseEvent KeyPress(Me, e2)
-
                     handled = handled OrElse e2.Handled
+                ElseIf res < 0 Then
+                    ' Dead key — gọi thêm lần nữa với VK_SPACE để clear trạng thái dead key
+                    Dim clearBuff As String = New String(Chr(0), 2)
+                    ToUnicode(&H20, 0, keyState, clearBuff, 2, 0)
                 End If
             End If
         End If

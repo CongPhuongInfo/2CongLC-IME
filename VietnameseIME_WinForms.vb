@@ -12,7 +12,7 @@ Imports Microsoft.Win32
 '  - Tray icon: V (đang bật) / E (đang tắt)
 '  - Click đôi tray hoặc menu Toggle để bật/tắt
 '  - Tuỳ chọn: khởi động cùng Windows, ẩn xuống tray
-'  Version: 13062026
+'  Version: 15062026
 ' ============================================================
 
 #Region "WIN32 API"
@@ -177,7 +177,7 @@ Public Class MainForm
 
         ' ── Version label ──
         Dim lblVer As New Label()
-        lblVer.Text = "v13062026  –  2CongLC"
+        lblVer.Text = "v15062026  –  2CongLC"
         lblVer.ForeColor = Color.Gray
         lblVer.Font = New Font("Segoe UI", 7.5)
         lblVer.Location = New Point(20, 148)
@@ -368,30 +368,43 @@ Public Class MainForm
     Private Sub HandleKeyDown(sender As Object, e As KeyEventArgs)
         If Not _enabled Then Return
 
-        ' Shift + phím bất kỳ thường là đang select → flush buffer
-        If e.Shift AndAlso _buf.Length > 0 Then
+        ' Win key kết hợp bất kỳ (SuppressKeyPress được tái dụng để báo Win key từ GlobalHook)
+        If e.SuppressKeyPress AndAlso _buf.Length > 0 Then
             FlushBuffer(True)
             Return
         End If
 
-        If e.Control AndAlso e.KeyCode = Keys.Q Then
-            _hook.Stop()
-            trayIcon.Visible = False
-            Application.Exit()
+        ' Alt kết hợp phím bất kỳ (Alt+Tab, Alt+F4, v.v.) → flush
+        If e.Alt AndAlso _buf.Length > 0 Then
+            FlushBuffer(True)
+            Return
+        End If
+
+        ' Ctrl kết hợp phím bất kỳ (Ctrl+C, Ctrl+V, v.v.) → flush
+        If e.Control AndAlso _buf.Length > 0 Then
+            FlushBuffer(True)
+            Return
+        End If
+
+        ' Shift + phím điều hướng / chọn vùng → flush
+        If e.Shift AndAlso _buf.Length > 0 Then
+            Select Case e.KeyCode
+                Case Keys.Left, Keys.Right, Keys.Up, Keys.Down,
+                     Keys.Home, Keys.End, Keys.Prior, Keys.Next,
+                     Keys.Delete, Keys.Insert, Keys.Back
+                    FlushBuffer(True)
+            End Select
             Return
         End If
 
         Select Case e.KeyCode
             Case Keys.Back
                 If _buf.Length > 0 Then
-                    ' Buffer có chữ: chặn Backspace gốc, tự xóa ký tự cuối trong buffer
                     e.Handled = True
                     _buf.Remove(_buf.Length - 1, 1)
                     _lastToneKey = Chr(0)
                     DeleteChars(1)
                 Else
-                    ' Buffer rỗng: để Backspace gốc tự xử lý, KHÔNG gọi DeleteChars
-                    ' tránh double-delete do SendInput cũng pass qua LLKHF_INJECTED
                     e.Handled = False
                 End If
 
@@ -400,7 +413,11 @@ Public Class MainForm
 
             Case Keys.Left, Keys.Right, Keys.Up, Keys.Down,
                  Keys.Home, Keys.End, Keys.Prior, Keys.Next,
-                 Keys.Delete, Keys.Escape
+                 Keys.Delete, Keys.Escape, Keys.Insert,
+                 Keys.F1, Keys.F2, Keys.F3, Keys.F4, Keys.F5,
+                 Keys.F6, Keys.F7, Keys.F8, Keys.F9, Keys.F10,
+                 Keys.F11, Keys.F12, Keys.PrintScreen, Keys.Scroll,
+                 Keys.Pause, Keys.NumLock, Keys.Capital
                 If _buf.Length > 0 Then FlushBuffer(True)
         End Select
     End Sub
@@ -419,22 +436,15 @@ Public Class MainForm
         Dim ch As Char = e.KeyChar
         If Char.IsControl(ch) Then Return
 
-        e.Handled = True
-
+        ' Ký tự không phải chữ/số → flush buffer rồi để phím gốc tự xử lý (không gửi lại)
         If Not Char.IsLetter(ch) AndAlso Not Char.IsDigit(ch) Then
             FlushBuffer(True)
-            Select Case ch
-                Case " "c
-                    SendVirtualKey(&H20US)
-                Case ChrW(13)
-                    SendVirtualKey(&HDUS)
-                Case ChrW(9)
-                    SendVirtualKey(&H9US)
-                Case Else
-                    SendUnicodeString(ch)
-            End Select
+            ' KHÔNG set e.Handled = True → phím gốc (Space, dấu câu, v.v.) tự pass qua
             Return
         End If
+
+        ' Từ đây chỉ còn chữ/số → IME xử lý, chặn phím gốc
+        e.Handled = True
 
         _buf.Append(ch)
         Dim raw As String = _buf.ToString()
