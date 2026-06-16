@@ -64,6 +64,21 @@ Module Win32
     Public Const KEYEVENTF_KEYUP As UInteger = &H2UI
     Public Const KEYEVENTF_UNICODE As UInteger = &H4UI
     Public Const VK_BACK As UShort = &H8US
+
+    ' ── API dùng cho Single-Instance: tìm & hiện lại cửa sổ đang chạy ──
+    <DllImport("user32.dll", SetLastError:=True, CharSet:=CharSet.Unicode)>
+    Public Function FindWindow(lpClassName As String, lpWindowName As String) As IntPtr
+    End Function
+
+    <DllImport("user32.dll")>
+    Public Function ShowWindow(hWnd As IntPtr, nCmdShow As Integer) As Boolean
+    End Function
+
+    <DllImport("user32.dll")>
+    Public Function SetForegroundWindow(hWnd As IntPtr) As Boolean
+    End Function
+
+    Public Const SW_RESTORE As Integer = 9
 End Module
 #End Region
 
@@ -76,6 +91,15 @@ Public Class MainForm
 #Region "Registry key"
     Private Const REG_RUN As String = "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
     Private Const APP_NAME As String = "VietnameseIME"
+    Private Const REG_SETTINGS As String = "SOFTWARE\VietnameseIME"
+    Private Const VAL_INPUT_METHOD As String = "InputMethod"
+#End Region
+
+#Region "Input Method"
+    Public Enum InputMethodType
+        Telex
+        VNI
+    End Enum
 #End Region
 
 #Region "Controls"
@@ -83,15 +107,21 @@ Public Class MainForm
     Private chkMinimizeToTray As CheckBox
     Private lblStatus As Label
     Private btnToggle As Button
+    Private lblMethod As Label
+    Private rdoTelex As RadioButton
+    Private rdoVNI As RadioButton
     Private trayIcon As NotifyIcon
     Private trayMenu As ContextMenuStrip
     Private trayToggleItem As ToolStripMenuItem
+    Private trayTelexItem As ToolStripMenuItem
+    Private trayVniItem As ToolStripMenuItem
 #End Region
 
 #Region "IME State"
     Private _hook As GlobalHook
     Private _trayClickTimer As Timer
     Private _enabled As Boolean = True   ' bật/tắt tiếng Việt
+    Private _inputMethod As InputMethodType = InputMethodType.Telex
     Private _buf As New StringBuilder()
     Private _lastToneKey As Char = Chr(0)
 #End Region
@@ -103,6 +133,14 @@ Public Class MainForm
     Private ReadOnly TonedToBase As New Dictionary(Of Char, Char)()
     Private ReadOnly BaseVowels As New HashSet(Of Char)("aăâeêiouưôơy".ToCharArray())
     Private ReadOnly VowelGroupMainPos As New Dictionary(Of String, Integer)()
+#End Region
+
+#Region "VNI tables"
+    ' Cặp [nguyên âm/phụ âm]+[số] → ký tự biến hình (â,ă,ê,ô,ơ,ư,đ). VD: "a6"→â, "d9"→đ
+    Private ReadOnly VniVowelModifiers As New Dictionary(Of String, Char)()
+    ' Số dấu thanh VNI (1 sắc,2 huyền,3 hỏi,4 ngã,5 nặng,0 xoá dấu) → mã dấu nội bộ
+    ' dùng chung với Telex (s,f,r,x,j,z) để tái sử dụng ToneTable/ApplyTone.
+    Private ReadOnly VniToneDigits As New Dictionary(Of Char, Char)()
 #End Region
 
     ' ── Constructor ──────────────────────────────────────────
@@ -122,7 +160,7 @@ Public Class MainForm
 #Region "UI Builder"
     Private Sub BuildUI()
         Me.Text = "Bộ gõ Tiếng Việt Telex"
-        Me.Size = New Size(320, 200)
+        Me.Size = New Size(320, 235)
         Me.FormBorderStyle = FormBorderStyle.FixedSingle
         Me.MaximizeBox = False
         Me.StartPosition = FormStartPosition.CenterScreen
@@ -157,11 +195,36 @@ Public Class MainForm
         sep.Location = New Point(20, 60)
         Me.Controls.Add(sep)
 
+        ' ── Kiểu gõ: Telex / VNI ──
+        lblMethod = New Label()
+        lblMethod.Text = "Kiểu gõ:"
+        lblMethod.Font = New Font("Segoe UI", 9)
+        lblMethod.Location = New Point(20, 73)
+        lblMethod.AutoSize = True
+        Me.Controls.Add(lblMethod)
+
+        rdoTelex = New RadioButton()
+        rdoTelex.Text = "Telex"
+        rdoTelex.Font = New Font("Segoe UI", 9)
+        rdoTelex.Location = New Point(90, 71)
+        rdoTelex.AutoSize = True
+        rdoTelex.Checked = True
+        AddHandler rdoTelex.CheckedChanged, AddressOf OnInputMethodChanged
+        Me.Controls.Add(rdoTelex)
+
+        rdoVNI = New RadioButton()
+        rdoVNI.Text = "VNI"
+        rdoVNI.Font = New Font("Segoe UI", 9)
+        rdoVNI.Location = New Point(175, 71)
+        rdoVNI.AutoSize = True
+        AddHandler rdoVNI.CheckedChanged, AddressOf OnInputMethodChanged
+        Me.Controls.Add(rdoVNI)
+
         ' ── Checkbox khởi động cùng hệ thống ──
         chkStartup = New CheckBox()
         chkStartup.Text = "Khởi động cùng Windows"
         chkStartup.Font = New Font("Segoe UI", 9)
-        chkStartup.Location = New Point(20, 75)
+        chkStartup.Location = New Point(20, 103)
         chkStartup.AutoSize = True
         AddHandler chkStartup.CheckedChanged, AddressOf OnStartupChanged
         Me.Controls.Add(chkStartup)
@@ -170,7 +233,7 @@ Public Class MainForm
         chkMinimizeToTray = New CheckBox()
         chkMinimizeToTray.Text = "Ẩn xuống tray khi đóng cửa sổ"
         chkMinimizeToTray.Font = New Font("Segoe UI", 9)
-        chkMinimizeToTray.Location = New Point(20, 105)
+        chkMinimizeToTray.Location = New Point(20, 131)
         chkMinimizeToTray.AutoSize = True
         AddHandler chkMinimizeToTray.CheckedChanged, AddressOf OnMinimizeToTrayChanged
         Me.Controls.Add(chkMinimizeToTray)
@@ -180,7 +243,7 @@ Public Class MainForm
         lblVer.Text = "v15062026  –  2CongLC"
         lblVer.ForeColor = Color.Gray
         lblVer.Font = New Font("Segoe UI", 7.5)
-        lblVer.Location = New Point(20, 148)
+        lblVer.Location = New Point(20, 178)
         lblVer.AutoSize = True
         Me.Controls.Add(lblVer)
 
@@ -195,6 +258,19 @@ Public Class MainForm
         trayToggleItem = New ToolStripMenuItem("Tắt tiếng Việt")
         AddHandler trayToggleItem.Click, AddressOf OnToggleClick
         trayMenu.Items.Add(trayToggleItem)
+
+        trayMenu.Items.Add(New ToolStripSeparator())
+
+        Dim methodMenu As New ToolStripMenuItem("Kiểu gõ")
+        trayTelexItem = New ToolStripMenuItem("Telex")
+        AddHandler trayTelexItem.Click, AddressOf OnTrayTelexClick
+        methodMenu.DropDownItems.Add(trayTelexItem)
+
+        trayVniItem = New ToolStripMenuItem("VNI")
+        AddHandler trayVniItem.Click, AddressOf OnTrayVniClick
+        methodMenu.DropDownItems.Add(trayVniItem)
+
+        trayMenu.Items.Add(methodMenu)
 
         trayMenu.Items.Add(New ToolStripSeparator())
 
@@ -294,6 +370,52 @@ Public Class MainForm
         ' giá trị được đọc trực tiếp từ checkbox khi cần
     End Sub
 
+    ''' <summary>
+    ''' Người dùng đổi radio Telex/VNI trên cửa sổ chính.
+    ''' </summary>
+    Private Sub OnInputMethodChanged(sender As Object, e As EventArgs)
+        If rdoVNI.Checked Then
+            SetInputMethod(InputMethodType.VNI)
+        Else
+            SetInputMethod(InputMethodType.Telex)
+        End If
+    End Sub
+
+    Private Sub OnTrayTelexClick(sender As Object, e As EventArgs)
+        SetInputMethod(InputMethodType.Telex)
+    End Sub
+
+    Private Sub OnTrayVniClick(sender As Object, e As EventArgs)
+        SetInputMethod(InputMethodType.VNI)
+    End Sub
+
+    ''' <summary>
+    ''' Đổi kiểu gõ hiện tại: đồng bộ radio + tray menu, xoá buffer đang gõ,
+    ''' và (tuỳ chọn) lưu lựa chọn vào registry để nhớ cho lần mở sau.
+    ''' </summary>
+    Private Sub SetInputMethod(method As InputMethodType, Optional saveSetting As Boolean = True)
+        _inputMethod = method
+        _buf.Clear()
+        _lastToneKey = Chr(0)
+
+        rdoTelex.Checked = (method = InputMethodType.Telex)
+        rdoVNI.Checked = (method = InputMethodType.VNI)
+        trayTelexItem.Checked = (method = InputMethodType.Telex)
+        trayVniItem.Checked = (method = InputMethodType.VNI)
+
+        If saveSetting Then SaveInputMethodSetting(method)
+    End Sub
+
+    Private Sub SaveInputMethodSetting(method As InputMethodType)
+        Try
+            Dim key As Microsoft.Win32.RegistryKey =
+                Microsoft.Win32.Registry.CurrentUser.CreateSubKey(REG_SETTINGS)
+            key.SetValue(VAL_INPUT_METHOD, method.ToString())
+            key.Close()
+        Catch
+        End Try
+    End Sub
+
     Private Sub LoadSettings()
         ' Đọc trạng thái startup từ registry
         Try
@@ -307,6 +429,22 @@ Public Class MainForm
         End Try
         ' Mặc định ẩn tray = bật
         chkMinimizeToTray.Checked = True
+
+        ' Đọc kiểu gõ đã lưu (Telex/VNI), mặc định Telex nếu chưa có
+        Dim savedMethod As InputMethodType = InputMethodType.Telex
+        Try
+            Dim key As Microsoft.Win32.RegistryKey =
+                Microsoft.Win32.Registry.CurrentUser.OpenSubKey(REG_SETTINGS, False)
+            If key IsNot Nothing Then
+                Dim v As String = TryCast(key.GetValue(VAL_INPUT_METHOD), String)
+                If String.Equals(v, InputMethodType.VNI.ToString(), StringComparison.OrdinalIgnoreCase) Then
+                    savedMethod = InputMethodType.VNI
+                End If
+                key.Close()
+            End If
+        Catch
+        End Try
+        SetInputMethod(savedMethod, False)
     End Sub
 #End Region
 
@@ -436,25 +574,38 @@ Public Class MainForm
         Dim ch As Char = e.KeyChar
         If Char.IsControl(ch) Then Return
 
+        Dim isDigit As Boolean = Char.IsDigit(ch)
+
         ' Ký tự không phải chữ/số → flush buffer rồi để phím gốc tự xử lý (không gửi lại)
-        If Not Char.IsLetter(ch) AndAlso Not Char.IsDigit(ch) Then
+        If Not Char.IsLetter(ch) AndAlso Not isDigit Then
             FlushBuffer(True)
             ' KHÔNG set e.Handled = True → phím gốc (Space, dấu câu, v.v.) tự pass qua
             Return
         End If
 
-        ' Từ đây chỉ còn chữ/số → IME xử lý, chặn phím gốc
+        ' Số: với Telex thì số không có ý nghĩa → flush buffer, để phím gốc tự pass qua.
+        ' Với VNI thì số chính là phím chức năng (biến hình nguyên âm / dấu thanh) nên phải xử lý tiếp.
+        If isDigit AndAlso _inputMethod = InputMethodType.Telex Then
+            FlushBuffer(True)
+            Return
+        End If
+
+        ' Từ đây: chữ cái (cả 2 kiểu) hoặc số (chỉ VNI) → IME xử lý, chặn phím gốc
         e.Handled = True
 
         _buf.Append(ch)
         Dim raw As String = _buf.ToString()
         Dim converted As String = Nothing
 
-        ' Bước 1: biến hình nguyên âm
+        ' Bảng biến hình nguyên âm/phụ âm theo kiểu gõ hiện tại
+        Dim vowelMods As Dictionary(Of String, Char) =
+            If(_inputMethod = InputMethodType.VNI, VniVowelModifiers, VowelModifiers)
+
+        ' Bước 1: biến hình nguyên âm (Telex: aa/ee/oo/... ; VNI: a6/o7/d9/...)
         If raw.Length >= 2 Then
             Dim pair As String = raw.Substring(raw.Length - 2).ToLower()
-            If VowelModifiers.ContainsKey(pair) Then
-                Dim newCh As Char = VowelModifiers(pair)
+            If vowelMods.ContainsKey(pair) Then
+                Dim newCh As Char = vowelMods(pair)
                 If Char.IsUpper(raw(raw.Length - 2)) Then newCh = Char.ToUpper(newCh)
                 converted = raw.Substring(0, raw.Length - 2) & newCh
                 _buf.Clear() : _buf.Append(converted)
@@ -462,15 +613,29 @@ Public Class MainForm
             End If
         End If
 
-        ' Bước 2: dấu thanh
-        If converted Is Nothing AndAlso ToneKeys.Contains(Char.ToLower(ch)) Then
-            Dim toneKey As Char = Char.ToLower(ch)
+        ' Bước 2: dấu thanh (Telex: s/f/r/x/j/z ; VNI: 1/2/3/4/5/0 → quy về cùng mã dấu nội bộ)
+        Dim toneKey As Char = Chr(0)
+        Dim isToneTrigger As Boolean = False
+        If converted Is Nothing Then
+            If _inputMethod = InputMethodType.VNI Then
+                isToneTrigger = VniToneDigits.TryGetValue(ch, toneKey)
+            Else
+                If ToneKeys.Contains(Char.ToLower(ch)) Then
+                    toneKey = Char.ToLower(ch)
+                    isToneTrigger = True
+                End If
+            End If
+        End If
+
+        If isToneTrigger Then
             Dim syllable As String = raw.Substring(0, raw.Length - 1)
 
             If _lastToneKey <> Chr(0) AndAlso HasTone(syllable) Then
                 If toneKey = _lastToneKey Then
-                    ' Bỏ dấu: khôi phục chữ gốc + append tone key để ra "as", "is", "aj"...
-                    converted = StripTone(syllable) & toneKey.ToString()
+                    ' Bỏ dấu: khôi phục chữ gốc + append đúng ký tự vừa gõ
+                    ' (Telex: chữ dấu, ví dụ "as","is","aj"... ; VNI: số, ví dụ "a1" → "as1"-style fallback)
+                    Dim appendChar As Char = If(_inputMethod = InputMethodType.VNI, ch, toneKey)
+                    converted = StripTone(syllable) & appendChar.ToString()
                     _lastToneKey = Chr(0)
                 Else
                     ' Đổi sang dấu khác
@@ -700,6 +865,7 @@ Public Class MainForm
 #Region "Init Tables"
     Private Sub InitTables()
         InitVowelModifiers()
+        InitVniTables()
         InitToneTable()
         InitTonedToBase()
         InitVowelGroupMainPos()
@@ -713,6 +879,26 @@ Public Class MainForm
         VowelModifiers.Add("ow", "ơ"c)
         VowelModifiers.Add("uw", "ư"c)
         VowelModifiers.Add("dd", "đ"c)
+    End Sub
+
+    Private Sub InitVniTables()
+        ' Biến hình nguyên âm / phụ âm: ký tự + số ngay sau
+        VniVowelModifiers.Add("a6", "â"c)
+        VniVowelModifiers.Add("a8", "ă"c)
+        VniVowelModifiers.Add("e6", "ê"c)
+        VniVowelModifiers.Add("o6", "ô"c)
+        VniVowelModifiers.Add("o7", "ơ"c)
+        VniVowelModifiers.Add("u7", "ư"c)
+        VniVowelModifiers.Add("d9", "đ"c)
+
+        ' Số dấu thanh: 1 sắc, 2 huyền, 3 hỏi, 4 ngã, 5 nặng, 0 xoá dấu
+        ' (quy về cùng mã dấu nội bộ s/f/r/x/j/z mà ToneTable đang dùng cho Telex)
+        VniToneDigits.Add("1"c, "s"c)
+        VniToneDigits.Add("2"c, "f"c)
+        VniToneDigits.Add("3"c, "r"c)
+        VniToneDigits.Add("4"c, "x"c)
+        VniToneDigits.Add("5"c, "j"c)
+        VniToneDigits.Add("0"c, "z"c)
     End Sub
 
     Private Sub InitToneTable()
@@ -766,17 +952,17 @@ Public Class MainForm
         VowelGroupMainPos("âu") = 0 : VowelGroupMainPos("ây") = 0
         VowelGroupMainPos("eo") = 0 : VowelGroupMainPos("êu") = 0
         VowelGroupMainPos("ia") = 0 : VowelGroupMainPos("iê") = 1
-        VowelGroupMainPos("iu") = 0 : VowelGroupMainPos("oa") = 1
-        VowelGroupMainPos("oe") = 1 : VowelGroupMainPos("oi") = 0
+        VowelGroupMainPos("iu") = 0 : VowelGroupMainPos("oa") = 0
+        VowelGroupMainPos("oe") = 0 : VowelGroupMainPos("oi") = 0
         VowelGroupMainPos("oo") = 0 : VowelGroupMainPos("ôi") = 0
         VowelGroupMainPos("ơi") = 0 : VowelGroupMainPos("ua") = 0
         VowelGroupMainPos("uâ") = 1 : VowelGroupMainPos("ue") = 1
         VowelGroupMainPos("ui") = 0 : VowelGroupMainPos("uo") = 0
         VowelGroupMainPos("uô") = 1 : VowelGroupMainPos("uơ") = 1
-        VowelGroupMainPos("uy") = 1 : VowelGroupMainPos("ưa") = 0
+        VowelGroupMainPos("uy") = 0 : VowelGroupMainPos("ưa") = 0
         VowelGroupMainPos("ưi") = 0 : VowelGroupMainPos("ươ") = 1
         VowelGroupMainPos("ưu") = 0 : VowelGroupMainPos("yê") = 1
-        VowelGroupMainPos("oê") = 1
+        VowelGroupMainPos("oê") = 0
 
         ' 3 nguyên âm
         VowelGroupMainPos("iêu") = 1 : VowelGroupMainPos("oai") = 1
@@ -796,13 +982,47 @@ Public Class MainForm
 End Class
 
 ' ════════════════════════════════════════════════════════════
-'  Entry Point
+'  Entry Point – Single Instance
+'  Nếu app đã chạy: tìm cửa sổ cũ (kể cả đang ẩn xuống tray),
+'  hiện nó lên & đưa lên foreground, rồi thoát ngay thay vì
+'  mở thêm 1 instance mới.
 ' ════════════════════════════════════════════════════════════
 Module Program
+    ' Tên mutex duy nhất cho app này (không trùng app khác)
+    Private Const MUTEX_NAME As String = "VietnameseIME_Telex_2CongLC_SingleInstance"
+    ' Phải khớp đúng Me.Text đặt trong BuildUI() của MainForm
+    Private Const MAIN_WINDOW_TITLE As String = "Bộ gõ Tiếng Việt Telex"
+
     <STAThread>
     Sub Main()
-        Application.EnableVisualStyles()
-        Application.SetCompatibleTextRenderingDefault(False)
-        Application.Run(New MainForm())
+        Dim createdNew As Boolean
+        Using mutex As New Threading.Mutex(True, MUTEX_NAME, createdNew)
+            If Not createdNew Then
+                ' Đã có 1 phiên bản đang chạy → đánh thức cửa sổ cũ rồi thoát,
+                ' không tạo MainForm mới
+                ActivateExistingInstance()
+                Return
+            End If
+
+            Try
+                Application.EnableVisualStyles()
+                Application.SetCompatibleTextRenderingDefault(False)
+                Application.Run(New MainForm())
+            Finally
+                mutex.ReleaseMutex()
+            End Try
+        End Using
+    End Sub
+
+    ''' <summary>
+    ''' Tìm cửa sổ chính của instance đang chạy (FindWindow vẫn tìm được
+    ''' dù cửa sổ đang Hide() xuống tray), sau đó Restore + đưa lên foreground.
+    ''' </summary>
+    Private Sub ActivateExistingInstance()
+        Dim hWnd As IntPtr = Win32.FindWindow(Nothing, MAIN_WINDOW_TITLE)
+        If hWnd <> IntPtr.Zero Then
+            Win32.ShowWindow(hWnd, Win32.SW_RESTORE)
+            Win32.SetForegroundWindow(hWnd)
+        End If
     End Sub
 End Module

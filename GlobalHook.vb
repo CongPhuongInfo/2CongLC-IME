@@ -327,10 +327,9 @@ Public Class GlobalHook
                     End If
                     Exit Select
             End Select
-            ' Chỉ fire KeyPress khi: không bị handled, không có Win key, không có Ctrl/Alt combo
-            If wParam = WM.KEYDOWN AndAlso Not handled AndAlso Not win AndAlso
-               Not (control AndAlso alt = False AndAlso KHS.vkCode <> VK.SPACE) = False AndAlso
-               Not control AndAlso Not alt AndAlso
+            ' Chỉ fire KeyPress khi: không bị handled, không có Win/Ctrl/Alt
+            If wParam = WM.KEYDOWN AndAlso Not handled AndAlso
+               Not win AndAlso Not control AndAlso Not alt AndAlso
                events("KeyPress") IsNot Nothing Then
 
                 Dim keyState As Byte() = New Byte(255) {}
