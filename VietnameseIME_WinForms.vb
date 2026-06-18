@@ -857,27 +857,28 @@ Public Class MainForm
     ''' Tách: [phụ âm đầu] + [nhóm nguyên âm] + [phụ âm cuối]
     ''' Nếu không hợp lệ → không áp dấu, trả về ký tự gốc cho app.
     ''' </summary>
+    ''' <summary>
+    ''' Trả về độ dài phụ âm đầu (0 nếu âm tiết bắt đầu bằng nguyên âm).
+    ''' Dùng chung cho cả IsValidVietnameseSyllable và FindTonePosition để
+    ''' tránh các ký tự "nguyên-âm-giả" nằm trong phụ âm ghép (gi, qu) bị
+    ''' tính lẫn vào nhóm nguyên âm thật khi xác định vị trí đặt dấu.
+    ''' </summary>
+    Private Function GetInitialConsonantLength(syllable As String) As Integer
+        Dim s As String = syllable.ToLowerInvariant()
+        For Each ic As String In New String() {"ngh", "gh", "gi", "ch", "kh", "ng", "nh", "ph", "th", "tr", "qu"}
+            If s.StartsWith(ic) Then Return ic.Length
+        Next
+        If s.Length > 0 AndAlso Not IsVowelChar(s(0)) Then Return 1
+        Return 0
+    End Function
+
     Private Function IsValidVietnameseSyllable(syllable As String) As Boolean
         If String.IsNullOrEmpty(syllable) Then Return False
         Dim s As String = syllable.ToLowerInvariant()
 
         ' Tách phụ âm đầu (greedy, dài nhất trước)
-        Dim initial As String = ""
-        Dim rest As String = s
-        For Each ic As String In New String() {"ngh", "gh", "gi", "ch", "kh", "ng", "nh", "ph", "th", "tr", "qu"}
-            If s.StartsWith(ic) Then
-                initial = ic
-                rest = s.Substring(ic.Length)
-                Exit For
-            End If
-        Next
-        If initial = "" Then
-            ' thử phụ âm đơn
-            If rest.Length > 0 AndAlso Not IsVowelChar(rest(0)) Then
-                initial = rest(0).ToString()
-                rest = rest.Substring(1)
-            End If
-        End If
+        Dim initialLen As Integer = GetInitialConsonantLength(s)
+        Dim rest As String = s.Substring(initialLen)
 
         ' Sau khi tách phụ âm đầu, phải còn nguyên âm
         If String.IsNullOrEmpty(rest) Then Return False
@@ -928,15 +929,20 @@ Public Class MainForm
 
     Private Function FindTonePosition(syl As String) As Integer
         If String.IsNullOrEmpty(syl) Then Return -1
+
+        ' Bỏ qua đúng số ký tự phụ âm đầu (vd "gi", "qu") để không lẫn
+        ' nguyên âm giả của phụ âm ghép vào nhóm nguyên âm thật.
+        Dim initialLen As Integer = GetInitialConsonantLength(syl)
+
         Dim vEnd As Integer = -1
         Dim i As Integer = syl.Length - 1
-        While i >= 0
+        While i >= initialLen
             If IsVowelChar(syl(i)) Then vEnd = i : Exit While
             i -= 1
         End While
         If vEnd < 0 Then Return -1
         i = vEnd
-        While i >= 0 AndAlso IsVowelChar(syl(i))
+        While i >= initialLen AndAlso IsVowelChar(syl(i))
             i -= 1
         End While
         Dim vStart As Integer = i + 1
