@@ -93,6 +93,7 @@ Public Class MainForm
     Private Const APP_NAME As String = "VietnameseIME"
     Private Const REG_SETTINGS As String = "SOFTWARE\VietnameseIME"
     Private Const VAL_INPUT_METHOD As String = "InputMethod"
+    Private Const VAL_GAME_MODE As String = "GameMode"
 #End Region
 
 #Region "Input Method"
@@ -105,6 +106,8 @@ Public Class MainForm
 #Region "Controls"
     Private chkStartup As CheckBox
     Private chkMinimizeToTray As CheckBox
+    Private chkGameMode As CheckBox
+    Private lblGameStatus As Label
     Private lblStatus As Label
     Private btnToggle As Button
     Private lblMethod As Label
@@ -124,6 +127,12 @@ Public Class MainForm
     Private _inputMethod As InputMethodType = InputMethodType.Telex
     Private _buf As New StringBuilder()
     Private _lastToneKey As Char = Chr(0)
+
+    ' ── Chế độ Game ──
+    ' Khi bật: phím dấu/chữ chỉ được IME xử lý lúc khung chat đang "mở" (đã
+    ' bấm Enter); còn lại nhả nguyên cho game dùng làm hotkey (R, F, S, X...).
+    Private _gameModeEnabled As Boolean = False
+    Private _chatOpenViaEnter As Boolean = False
 #End Region
 
 #Region "Telex tables"
@@ -150,9 +159,14 @@ Public Class MainForm
         BuildTrayIcon()
         LoadSettings()
 
-        _hook = New GlobalHook(False, True)
+        ' Bật cả hook chuột (True) lẫn hook bàn phím (True): cần biết khi nào
+        ' người dùng click/chọn vùng bằng chuột để xoá buffer kịp lúc — nếu
+        ' không, buffer cũ vẫn còn khi con trỏ đã dời chỗ bằng chuột, dẫn đến
+        ' áp dấu / xoá lùi nhầm vào vị trí mới.
+        _hook = New GlobalHook(True, True)
         AddHandler _hook.KeyDown, AddressOf HandleKeyDown
         AddHandler _hook.KeyPress, AddressOf HandleKeyPress
+        AddHandler _hook.OnMouseActivity, AddressOf HandleMouseActivity
 
         UpdateTrayIcon()
     End Sub
@@ -160,7 +174,7 @@ Public Class MainForm
 #Region "UI Builder"
     Private Sub BuildUI()
         Me.Text = "Bộ gõ Tiếng Việt Telex"
-        Me.Size = New Size(320, 235)
+        Me.Size = New Size(320, 275)
         Me.FormBorderStyle = FormBorderStyle.FixedSingle
         Me.MaximizeBox = False
         Me.StartPosition = FormStartPosition.CenterScreen
@@ -238,12 +252,33 @@ Public Class MainForm
         AddHandler chkMinimizeToTray.CheckedChanged, AddressOf OnMinimizeToTrayChanged
         Me.Controls.Add(chkMinimizeToTray)
 
+        ' ── Checkbox Chế độ Game ──
+        ' Bật: chỉ gõ tiếng Việt khi khung chat trong game đang "mở" (đã bấm
+        ' Enter); lúc khung chat đóng, mọi phím (kể cả s/f/r/x/j/z) được nhả
+        ' nguyên cho game dùng làm hotkey, không bị IME chặn/biến đổi.
+        chkGameMode = New CheckBox()
+        chkGameMode.Text = "Chế độ Game (Enter để mở/đóng khung chat)"
+        chkGameMode.Font = New Font("Segoe UI", 9)
+        chkGameMode.Location = New Point(20, 159)
+        chkGameMode.AutoSize = True
+        AddHandler chkGameMode.CheckedChanged, AddressOf OnGameModeChanged
+        Me.Controls.Add(chkGameMode)
+
+        lblGameStatus = New Label()
+        lblGameStatus.Text = ""
+        lblGameStatus.Font = New Font("Segoe UI", 8, FontStyle.Italic)
+        lblGameStatus.ForeColor = Color.Gray
+        lblGameStatus.Location = New Point(38, 181)
+        lblGameStatus.AutoSize = True
+        lblGameStatus.Visible = False
+        Me.Controls.Add(lblGameStatus)
+
         ' ── Version label ──
         Dim lblVer As New Label()
-        lblVer.Text = "v15062026  –  2CongLC"
+        lblVer.Text = "v18062026  –  2CongLC"
         lblVer.ForeColor = Color.Gray
         lblVer.Font = New Font("Segoe UI", 7.5)
-        lblVer.Location = New Point(20, 178)
+        lblVer.Location = New Point(20, 218)
         lblVer.AutoSize = True
         Me.Controls.Add(lblVer)
 
@@ -347,6 +382,8 @@ Public Class MainForm
         _enabled = Not _enabled
         _buf.Clear()
         _lastToneKey = Chr(0)
+        _chatOpenViaEnter = False
+        UpdateGameStatusLabel()
         UpdateTrayIcon()
     End Sub
 
@@ -369,6 +406,53 @@ Public Class MainForm
     Private Sub OnMinimizeToTrayChanged(sender As Object, e As EventArgs)
         ' giá trị được đọc trực tiếp từ checkbox khi cần
     End Sub
+
+    Private Sub OnGameModeChanged(sender As Object, e As EventArgs)
+        _gameModeEnabled = chkGameMode.Checked
+        _chatOpenViaEnter = False
+        _buf.Clear()
+        _lastToneKey = Chr(0)
+        UpdateGameStatusLabel()
+        SaveGameModeSetting(_gameModeEnabled)
+    End Sub
+
+    Private Sub SaveGameModeSetting(enabled As Boolean)
+        Try
+            Dim key As Microsoft.Win32.RegistryKey =
+                Microsoft.Win32.Registry.CurrentUser.CreateSubKey(REG_SETTINGS)
+            key.SetValue(VAL_GAME_MODE, If(enabled, "1", "0"))
+            key.Close()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Cập nhật dòng trạng thái nhỏ dưới checkbox Chế độ Game, cho biết hiện
+    ''' tại phím dấu đang được IME xử lý hay đang nhả nguyên cho game.
+    ''' </summary>
+    Private Sub UpdateGameStatusLabel()
+        If Not _gameModeEnabled Then
+            lblGameStatus.Visible = False
+            Return
+        End If
+        lblGameStatus.Visible = True
+        If _chatOpenViaEnter Then
+            lblGameStatus.Text = "→ Khung chat ĐANG MỞ: gõ tiếng Việt"
+            lblGameStatus.ForeColor = Color.FromArgb(0, 153, 76)
+        Else
+            lblGameStatus.Text = "→ Khung chat đang đóng: nhả phím cho game"
+            lblGameStatus.ForeColor = Color.Gray
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' IME có nên xử lý/chặn phím vừa gõ không. Ngoài việc bật/tắt tổng
+    ''' (_enabled), khi Chế độ Game đang bật thì còn phải đang ở trong khung
+    ''' chat (_chatOpenViaEnter) mới xử lý — nếu không thì nhả nguyên cho game.
+    ''' </summary>
+    Private Function IsImeActive() As Boolean
+        Return _enabled AndAlso (Not _gameModeEnabled OrElse _chatOpenViaEnter)
+    End Function
 
     ''' <summary>
     ''' Người dùng đổi radio Telex/VNI trên cửa sổ chính.
@@ -429,6 +513,21 @@ Public Class MainForm
         End Try
         ' Mặc định ẩn tray = bật
         chkMinimizeToTray.Checked = True
+
+        ' Đọc trạng thái Chế độ Game đã lưu, mặc định tắt nếu chưa có
+        Try
+            Dim key As Microsoft.Win32.RegistryKey =
+                Microsoft.Win32.Registry.CurrentUser.OpenSubKey(REG_SETTINGS, False)
+            If key IsNot Nothing Then
+                Dim gm As String = TryCast(key.GetValue(VAL_GAME_MODE), String)
+                chkGameMode.Checked = (gm = "1")
+                key.Close()
+            End If
+        Catch
+        End Try
+        _gameModeEnabled = chkGameMode.Checked
+        _chatOpenViaEnter = False
+        UpdateGameStatusLabel()
 
         ' Đọc kiểu gõ đã lưu (Telex/VNI), mặc định Telex nếu chưa có
         Dim savedMethod As InputMethodType = InputMethodType.Telex
@@ -503,8 +602,46 @@ Public Class MainForm
 #End Region
 
 #Region "Hook Handlers"
+    ''' <summary>
+    ''' Click chuột (trái/phải/giữa) có thể làm con trỏ soạn thảo dời sang vị
+    ''' trí khác hoặc tạo selection mới trong app đang gõ — hook bàn phím
+    ''' không thể biết việc này. Phải xoá buffer ngay khi phát hiện click,
+    ''' nếu không lần áp dấu/xoá lùi kế tiếp sẽ tính nhầm vào vị trí cũ.
+    ''' (Bỏ qua sự kiện di chuột thuần — chỉ xử lý lúc nhấn nút.)
+    ''' </summary>
+    Private Sub HandleMouseActivity(sender As Object, e As MouseEventArgs)
+        If Not _enabled Then Return
+        If e.Button <> MouseButtons.None Then
+            FlushBuffer(True)
+        End If
+    End Sub
+
     Private Sub HandleKeyDown(sender As Object, e As KeyEventArgs)
         If Not _enabled Then Return
+
+        ' Chế độ Game: Enter dùng để MỞ/ĐÓNG khung chat (bật/tắt xử lý tiếng
+        ' Việt). Kiểm tra này phải nằm TRƯỚC IsImeActive(), vì lúc chat đang
+        ' đóng thì chính Enter là phím sẽ mở chat ra.
+        ' KHÔNG set e.Handled → phím Enter thật vẫn gửi cho game như bình
+        ' thường (để game tự mở/đóng/gửi khung chat của nó).
+        If _gameModeEnabled AndAlso e.KeyCode = Keys.Return Then
+            _chatOpenViaEnter = Not _chatOpenViaEnter
+            If Not _chatOpenViaEnter Then
+                _buf.Clear()
+                _lastToneKey = Chr(0)
+            End If
+            UpdateGameStatusLabel()
+        End If
+
+        ' Esc trong khi khung chat đang mở → coi như hủy/đóng chat, không gõ nữa
+        If _gameModeEnabled AndAlso _chatOpenViaEnter AndAlso e.KeyCode = Keys.Escape Then
+            _chatOpenViaEnter = False
+            _buf.Clear()
+            _lastToneKey = Chr(0)
+            UpdateGameStatusLabel()
+        End If
+
+        If Not IsImeActive() Then Return
 
         ' Win key kết hợp bất kỳ (SuppressKeyPress được tái dụng để báo Win key từ GlobalHook)
         If e.SuppressKeyPress AndAlso _buf.Length > 0 Then
@@ -569,7 +706,7 @@ Public Class MainForm
     End Sub
 
     Private Sub HandleKeyPress(sender As Object, e As KeyPressEventArgs)
-        If Not _enabled Then Return
+        If Not IsImeActive() Then Return
 
         Dim ch As Char = e.KeyChar
         If Char.IsControl(ch) Then Return
@@ -633,8 +770,10 @@ Public Class MainForm
             If _lastToneKey <> Chr(0) AndAlso HasTone(syllable) Then
                 If toneKey = _lastToneKey Then
                     ' Bỏ dấu: khôi phục chữ gốc + append đúng ký tự vừa gõ
-                    ' (Telex: chữ dấu, ví dụ "as","is","aj"... ; VNI: số, ví dụ "a1" → "as1"-style fallback)
-                    Dim appendChar As Char = If(_inputMethod = InputMethodType.VNI, ch, toneKey)
+                    ' (dùng "ch" (ký tự gốc, giữ đúng hoa/thường) thay vì "toneKey"
+                    ' (luôn là chữ thường) để không làm sai hoa/thường khi gõ
+                    ' toàn chữ HOA, ví dụ Caps Lock đang bật)
+                    Dim appendChar As Char = ch
                     converted = StripTone(syllable) & appendChar.ToString()
                     _lastToneKey = Chr(0)
                 Else
@@ -655,10 +794,16 @@ Public Class MainForm
             If converted IsNot Nothing Then
                 _buf.Clear() : _buf.Append(converted)
             Else
-                _buf.Remove(_buf.Length - 1, 1)
+                ' QUAN TRỌNG: KHÔNG xoá ký tự vừa gõ khỏi _buf.
+                ' Ký tự này vẫn được gửi ra app như bình thường ở khối render
+                ' chung phía dưới (converted = Nothing → SendUnicodeString(ch)),
+                ' nên phải giữ nó trong buffer để buffer luôn khớp 1:1 với nội
+                ' dung đã hiển thị trên màn hình.
+                ' (Bug cũ: xoá khỏi buf nhưng vẫn gửi ra màn hình → buffer bị
+                ' lệch ngắn hơn màn hình 1 ký tự; lần áp dấu kế tiếp tính sai
+                ' số ký tự cần xoá lùi → gây lỗi kiểu "Trình" bị render thành
+                ' "TTình".)
                 _lastToneKey = Chr(0)
-                SendUnicodeString(ch)
-                Return
             End If
         End If
 

@@ -373,6 +373,9 @@ Public Class GlobalHook
                 Case WM.RBUTTONDOWN
                     button = MouseButtons.Right
                     Exit Select
+                Case WM.MBUTTONDOWN
+                    button = MouseButtons.Middle
+                    Exit Select
                 Case WM.MOUSEWHEEL
                     If MSH.mouseData > 0 Then
                         delta = 120
