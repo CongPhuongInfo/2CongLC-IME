@@ -4,4 +4,5 @@
 - Mã nguồn mở , dễ dàng phát triển theo mục đích riêng của bạn.
 # Tác Giả : CongPhuongInfo@Gmail.com
 # Lịch sử phát triển :
+- 18/06/2026 : Thêm tính năng gõ chữ khi chơi game không bị lỗi khóa phím.
 - 21/06/2026 : Thêm bảng mã TCVN3 và VNI, Công cụ chuyển đổi qua lại giữa Unicode Sang TNVC3 và VNI.
