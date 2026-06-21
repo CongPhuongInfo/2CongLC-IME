@@ -189,9 +189,13 @@ Public Class MainForm
     ' Ta ghép 2 trang vào 1 dict: value là String thay vì Char vì một số ký tự Unicode
     ' cần 2 byte TCVN3 (ký tự hoa có dấu nằm ở trang ABC+, nhưng ở đây ta đơn giản
     ' dùng 1 byte duy nhất từ bảng ghép bên dưới — đủ cho 99% trường hợp thực tế).
-    Private ReadOnly TCVN3Map As New Dictionary(Of Char, Byte)()
+    ' Shared: dùng chung cho cả tính năng gõ trực tiếp (SendTCVN3String) và
+    ' tính năng "Chuyển đổi mã" (FrmConvert) — không cần tạo MainForm mới.
+    Private Shared ReadOnly TCVN3Map As New Dictionary(Of Char, Byte)()
+    ' Bảng đảo ngược byte TCVN3 → Unicode, dựng tự động từ TCVN3Map (xem InitEncodingMaps).
+    Private Shared ReadOnly TCVN3ReverseMap As New Dictionary(Of Byte, Char)()
     ' Unicode → VNI-Windows (Windows-1258 / CP1258)
-    Private ReadOnly VNIWinMap As New Dictionary(Of Char, Byte)()
+    Private Shared ReadOnly VNIWinMap As New Dictionary(Of Char, Byte)()
 #End Region
 
     ' ── Constructor ──────────────────────────────────────────
@@ -216,7 +220,7 @@ Public Class MainForm
 #Region "UI Builder"
     Private Sub BuildUI()
         Me.Text = "Bộ gõ Tiếng Việt Telex"
-        Me.Size = New Size(320, 305)
+        Me.Size = New Size(320, 335)
         Me.FormBorderStyle = FormBorderStyle.FixedSingle
         Me.MaximizeBox = False
         Me.StartPosition = FormStartPosition.CenterScreen
@@ -332,12 +336,25 @@ Public Class MainForm
         lblGameStatus.Visible = False
         Me.Controls.Add(lblGameStatus)
 
+        ' ── Nút mở cửa sổ Chuyển đổi mã ──
+        Dim btnConvert As New Button()
+        btnConvert.Text = "Chuyển đổi mã..."
+        btnConvert.Size = New Size(278, 30)
+        btnConvert.Location = New Point(20, 238)
+        btnConvert.FlatStyle = FlatStyle.Flat
+        btnConvert.BackColor = Color.FromArgb(0, 120, 215)
+        btnConvert.ForeColor = Color.White
+        btnConvert.Font = New Font("Segoe UI", 9, FontStyle.Bold)
+        btnConvert.FlatAppearance.BorderSize = 0
+        AddHandler btnConvert.Click, AddressOf OnOpenConverterClick
+        Me.Controls.Add(btnConvert)
+
         ' ── Version label ──
         Dim lblVer As New Label()
         lblVer.Text = "v21062026  –  2CongLC"
         lblVer.ForeColor = Color.Gray
         lblVer.Font = New Font("Segoe UI", 7.5)
-        lblVer.Location = New Point(20, 248)
+        lblVer.Location = New Point(20, 278)
         lblVer.AutoSize = True
         Me.Controls.Add(lblVer)
 
@@ -365,6 +382,40 @@ Public Class MainForm
         methodMenu.DropDownItems.Add(trayVniItem)
 
         trayMenu.Items.Add(methodMenu)
+
+        trayMenu.Items.Add(New ToolStripSeparator())
+
+        ' ── Menu Chuyển đổi mã ──
+        Dim convertMenu As New ToolStripMenuItem("Chuyển đổi mã")
+
+        Dim openConvertItem As New ToolStripMenuItem("Mở cửa sổ chuyển đổi...")
+        AddHandler openConvertItem.Click, AddressOf OnOpenConverterClick
+        convertMenu.DropDownItems.Add(openConvertItem)
+
+        convertMenu.DropDownItems.Add(New ToolStripSeparator())
+
+        Dim quickLabels As String() = {
+            "Clipboard: Unicode → TCVN3",
+            "Clipboard: TCVN3 → Unicode",
+            "Clipboard: Unicode → VNI Windows",
+            "Clipboard: VNI Windows → Unicode"
+        }
+        Dim quickFrom As OutputEncodingType() = {
+            OutputEncodingType.Unicode, OutputEncodingType.TCVN3,
+            OutputEncodingType.Unicode, OutputEncodingType.VNIWindows
+        }
+        Dim quickTo As OutputEncodingType() = {
+            OutputEncodingType.TCVN3, OutputEncodingType.Unicode,
+            OutputEncodingType.VNIWindows, OutputEncodingType.Unicode
+        }
+        For i As Integer = 0 To quickLabels.Length - 1
+            Dim item As New ToolStripMenuItem(quickLabels(i))
+            item.Tag = New OutputEncodingType() {quickFrom(i), quickTo(i)}
+            AddHandler item.Click, AddressOf OnTrayQuickConvertClick
+            convertMenu.DropDownItems.Add(item)
+        Next
+
+        trayMenu.Items.Add(convertMenu)
 
         trayMenu.Items.Add(New ToolStripSeparator())
 
@@ -553,6 +604,38 @@ Public Class MainForm
 
     Private Sub OnTrayVniClick(sender As Object, e As EventArgs)
         SetInputMethod(InputMethodType.VNI)
+    End Sub
+
+    ''' <summary>Mở cửa sổ "Chuyển đổi mã" (dùng chung cho nút trên form chính và menu tray).</summary>
+    Private Sub OnOpenConverterClick(sender As Object, e As EventArgs)
+        Dim frm As New FrmConvert()
+        frm.Show()
+        frm.BringToFront()
+    End Sub
+
+    ''' <summary>
+    ''' Chuyển đổi nhanh nội dung Clipboard theo cặp mã (from, to) lưu trong Tag
+    ''' của ToolStripMenuItem tương ứng, rồi ghi kết quả ngược lại Clipboard.
+    ''' </summary>
+    Private Sub OnTrayQuickConvertClick(sender As Object, e As EventArgs)
+        Dim item As ToolStripMenuItem = TryCast(sender, ToolStripMenuItem)
+        If item Is Nothing Then Return
+        Dim pair As OutputEncodingType() = TryCast(item.Tag, OutputEncodingType())
+        If pair Is Nothing OrElse pair.Length <> 2 Then Return
+
+        Try
+            If Not Clipboard.ContainsText() Then
+                trayIcon.ShowBalloonTip(2000, "Chuyển đổi mã", "Clipboard không có văn bản.", ToolTipIcon.Warning)
+                Return
+            End If
+            Dim original As String = Clipboard.GetText()
+            Dim result As String = ConvertVietnameseText(original, pair(0), pair(1))
+            Clipboard.SetText(result)
+            trayIcon.ShowBalloonTip(2000, "Chuyển đổi mã",
+                "Đã chuyển đổi và dán kết quả vào Clipboard (Ctrl+V để dùng).", ToolTipIcon.Info)
+        Catch ex As Exception
+            trayIcon.ShowBalloonTip(2000, "Chuyển đổi mã", "Lỗi: " & ex.Message, ToolTipIcon.Error)
+        End Try
     End Sub
 
     ''' <summary>
@@ -1321,7 +1404,7 @@ Public Class MainForm
     ''' Nguồn: TCVN 5712-1:1993 + phần mở rộng phổ biến (BKHN, VNI-Times…).
     ''' VNI-Windows dùng CP1258 nên không cần bảng riêng — dùng .NET Encoding.GetEncoding(1258).
     ''' </summary>
-    Private Sub InitEncodingMaps()
+    Private Shared Sub InitEncodingMaps()
         ' ══════════════════════════════════════════════════════
         '  TCVN3 – chữ thường (font ABC)
         ' ══════════════════════════════════════════════════════
@@ -1409,9 +1492,311 @@ Public Class MainForm
         ' Encoding.GetEncoding(1258), không cần bảng thủ công.
         ' VNIWinMap chỉ dùng để fallback nếu hệ thống không có CP1258.
         ' (Để trống — SendVNIWindowsString tự gọi Encoding.GetEncoding)
+
+        ' ── Dựng bảng đảo ngược byte TCVN3 → Unicode (dùng cho chuyển đổi mã) ──
+        TCVN3ReverseMap.Clear()
+        For Each kvp As KeyValuePair(Of Char, Byte) In TCVN3Map
+            If Not TCVN3ReverseMap.ContainsKey(kvp.Value) Then
+                TCVN3ReverseMap(kvp.Value) = kvp.Key
+            End If
+        Next
     End Sub
 #End Region
 
+#Region "Chuyển đổi mã (Code Conversion)"
+    ''' <summary>
+    ''' Chuyển đổi văn bản tiếng Việt qua lại giữa Unicode, TCVN3 (ABC/ABC+)
+    ''' và VNI Windows (CP1258). Dùng chung cho cửa sổ FrmConvert và menu tray.
+    ''' Văn bản ở dạng TCVN3/VNI "legacy" được biểu diễn bằng chuỗi có mã ký tự
+    ''' 0-255 tương ứng đúng giá trị byte gốc (giống cách SendTCVN3String /
+    ''' SendVNIWindowsString đang gửi WM_CHAR) — tức là cách văn bản "chữ lạ"
+    ''' (gõ font cũ rồi bị copy ra ngoài, hoặc lưu trong file .txt không Unicode).
+    ''' </summary>
+    Public Shared Function ConvertVietnameseText(text As String, fromEnc As OutputEncodingType, toEnc As OutputEncodingType) As String
+        If String.IsNullOrEmpty(text) OrElse fromEnc = toEnc Then Return text
+        Dim unicodeText As String = LegacyToUnicode(text, fromEnc)
+        Return UnicodeToLegacy(unicodeText, toEnc)
+    End Function
+
+    ''' <summary>Chuyển 1 bảng mã bất kỳ → Unicode chuẩn (không làm gì nếu đã là Unicode).</summary>
+    Private Shared Function LegacyToUnicode(text As String, enc As OutputEncodingType) As String
+        Select Case enc
+            Case OutputEncodingType.TCVN3
+                Dim sb As New StringBuilder(text.Length)
+                For Each ch As Char In text
+                    Dim code As Integer = AscW(ch)
+                    Dim u As Char
+                    If code >= 0 AndAlso code <= 255 AndAlso TCVN3ReverseMap.TryGetValue(CByte(code), u) Then
+                        sb.Append(u)
+                    Else
+                        sb.Append(ch)
+                    End If
+                Next
+                Return sb.ToString()
+
+            Case OutputEncodingType.VNIWindows
+                Try
+                    Dim cp1258 As Encoding = Encoding.GetEncoding(1258)
+                    Dim bytes(text.Length - 1) As Byte
+                    For i As Integer = 0 To text.Length - 1
+                        Dim code As Integer = AscW(text(i))
+                        bytes(i) = CByte(If(code >= 0 AndAlso code <= 255, code, 63)) ' 63 = '?'
+                    Next
+                    Return cp1258.GetString(bytes)
+                Catch
+                    Return text ' không có CP1258 trên máy → trả nguyên văn
+                End Try
+
+            Case Else ' Unicode
+                Return text
+        End Select
+    End Function
+
+    ''' <summary>Chuyển từ Unicode chuẩn → 1 bảng mã legacy bất kỳ (TCVN3/VNI), giữ nguyên nếu đích là Unicode.</summary>
+    Private Shared Function UnicodeToLegacy(text As String, enc As OutputEncodingType) As String
+        Select Case enc
+            Case OutputEncodingType.TCVN3
+                Dim sb As New StringBuilder(text.Length)
+                For Each ch As Char In text
+                    Dim b As Byte
+                    If TCVN3Map.TryGetValue(ch, b) Then
+                        sb.Append(ChrW(b))
+                    Else
+                        sb.Append(ch) ' ký tự không dấu / không có trong bảng → giữ nguyên
+                    End If
+                Next
+                Return sb.ToString()
+
+            Case OutputEncodingType.VNIWindows
+                Try
+                    Dim cp1258 As Encoding = Encoding.GetEncoding(1258)
+                    Dim bytes() As Byte = cp1258.GetBytes(text)
+                    Dim sb As New StringBuilder(bytes.Length)
+                    For Each b As Byte In bytes
+                        sb.Append(ChrW(b))
+                    Next
+                    Return sb.ToString()
+                Catch
+                    Return text
+                End Try
+
+            Case Else ' Unicode
+                Return text
+        End Select
+    End Function
+#End Region
+
+End Class
+
+' ════════════════════════════════════════════════════════════
+'  Cửa sổ "Chuyển đổi mã" – chuyển văn bản qua lại giữa
+'  Unicode, TCVN3 (ABC/ABC+) và VNI Windows (CP1258).
+'  Dùng lại MainForm.ConvertVietnameseText (Shared) để đảm bảo
+'  khớp 100% với bảng mã mà bộ gõ đang dùng khi gửi phím.
+' ════════════════════════════════════════════════════════════
+Public Class FrmConvert
+    Inherits Form
+
+    Private cboFrom As ComboBox
+    Private cboTo As ComboBox
+    Private txtInput As TextBox
+    Private txtOutput As TextBox
+    Private btnConvert As Button
+    Private btnSwap As Button
+    Private btnPaste As Button
+    Private btnCopy As Button
+    Private btnClear As Button
+
+    Public Sub New()
+        BuildUI()
+    End Sub
+
+    Private Sub BuildUI()
+        Me.Text = "Chuyển đổi mã – Unicode / TCVN3 / VNI Windows"
+        Me.Size = New Size(560, 480)
+        Me.FormBorderStyle = FormBorderStyle.FixedSingle
+        Me.MaximizeBox = False
+        Me.StartPosition = FormStartPosition.CenterScreen
+        Me.BackColor = Color.FromArgb(245, 245, 245)
+
+        Dim lblFrom As New Label()
+        lblFrom.Text = "Từ bảng mã:"
+        lblFrom.Font = New Font("Segoe UI", 9)
+        lblFrom.Location = New Point(20, 18)
+        lblFrom.AutoSize = True
+        Me.Controls.Add(lblFrom)
+
+        cboFrom = New ComboBox()
+        cboFrom.Font = New Font("Segoe UI", 9)
+        cboFrom.Location = New Point(110, 15)
+        cboFrom.Size = New Size(180, 24)
+        cboFrom.DropDownStyle = ComboBoxStyle.DropDownList
+        cboFrom.Items.AddRange(New Object() {"Unicode (UTF-8)", "TCVN3 (ABC/ABC+)", "VNI Windows (CP1258)"})
+        cboFrom.SelectedIndex = 1 ' mặc định: TCVN3 → Unicode (trường hợp dùng nhiều nhất)
+        Me.Controls.Add(cboFrom)
+
+        btnSwap = New Button()
+        btnSwap.Text = "⇄"
+        btnSwap.Size = New Size(36, 26)
+        btnSwap.Location = New Point(300, 14)
+        btnSwap.FlatStyle = FlatStyle.Flat
+        btnSwap.Font = New Font("Segoe UI", 10, FontStyle.Bold)
+        AddHandler btnSwap.Click, AddressOf OnSwapClick
+        Me.Controls.Add(btnSwap)
+
+        Dim lblTo As New Label()
+        lblTo.Text = "Sang bảng mã:"
+        lblTo.Font = New Font("Segoe UI", 9)
+        lblTo.Location = New Point(345, 18)
+        lblTo.AutoSize = True
+        Me.Controls.Add(lblTo)
+
+        cboTo = New ComboBox()
+        cboTo.Font = New Font("Segoe UI", 9)
+        cboTo.Location = New Point(440, 15)
+        cboTo.Size = New Size(85, 24)
+        cboTo.DropDownStyle = ComboBoxStyle.DropDownList
+        cboTo.Items.AddRange(New Object() {"Unicode", "TCVN3", "VNI"})
+        cboTo.SelectedIndex = 0 ' mặc định: → Unicode
+        Me.Controls.Add(cboTo)
+
+        Dim lblInput As New Label()
+        lblInput.Text = "Văn bản gốc:"
+        lblInput.Font = New Font("Segoe UI", 9)
+        lblInput.Location = New Point(20, 52)
+        lblInput.AutoSize = True
+        Me.Controls.Add(lblInput)
+
+        txtInput = New TextBox()
+        txtInput.Multiline = True
+        txtInput.ScrollBars = ScrollBars.Vertical
+        txtInput.Font = New Font("Segoe UI", 10)
+        txtInput.Location = New Point(20, 72)
+        txtInput.Size = New Size(505, 130)
+        Me.Controls.Add(txtInput)
+
+        btnPaste = New Button()
+        btnPaste.Text = "Dán từ Clipboard"
+        btnPaste.Size = New Size(150, 28)
+        btnPaste.Location = New Point(20, 208)
+        btnPaste.FlatStyle = FlatStyle.Flat
+        AddHandler btnPaste.Click, AddressOf OnPasteClick
+        Me.Controls.Add(btnPaste)
+
+        btnClear = New Button()
+        btnClear.Text = "Xoá"
+        btnClear.Size = New Size(80, 28)
+        btnClear.Location = New Point(178, 208)
+        btnClear.FlatStyle = FlatStyle.Flat
+        AddHandler btnClear.Click, AddressOf OnClearClick
+        Me.Controls.Add(btnClear)
+
+        btnConvert = New Button()
+        btnConvert.Text = "Chuyển đổi ▼"
+        btnConvert.Size = New Size(150, 32)
+        btnConvert.Location = New Point(375, 206)
+        btnConvert.FlatStyle = FlatStyle.Flat
+        btnConvert.BackColor = Color.FromArgb(0, 120, 215)
+        btnConvert.ForeColor = Color.White
+        btnConvert.Font = New Font("Segoe UI", 9, FontStyle.Bold)
+        btnConvert.FlatAppearance.BorderSize = 0
+        AddHandler btnConvert.Click, AddressOf OnConvertClick
+        Me.Controls.Add(btnConvert)
+
+        Dim lblOutput As New Label()
+        lblOutput.Text = "Kết quả:"
+        lblOutput.Font = New Font("Segoe UI", 9)
+        lblOutput.Location = New Point(20, 248)
+        lblOutput.AutoSize = True
+        Me.Controls.Add(lblOutput)
+
+        txtOutput = New TextBox()
+        txtOutput.Multiline = True
+        txtOutput.ScrollBars = ScrollBars.Vertical
+        txtOutput.ReadOnly = True
+        txtOutput.BackColor = Color.White
+        txtOutput.Font = New Font("Segoe UI", 10)
+        txtOutput.Location = New Point(20, 268)
+        txtOutput.Size = New Size(505, 130)
+        Me.Controls.Add(txtOutput)
+
+        btnCopy = New Button()
+        btnCopy.Text = "Copy kết quả"
+        btnCopy.Size = New Size(150, 28)
+        btnCopy.Location = New Point(20, 404)
+        btnCopy.FlatStyle = FlatStyle.Flat
+        btnCopy.BackColor = Color.FromArgb(0, 153, 76)
+        btnCopy.ForeColor = Color.White
+        AddHandler btnCopy.Click, AddressOf OnCopyClick
+        Me.Controls.Add(btnCopy)
+
+        Dim lblNote As New Label()
+        lblNote.Text = "Ghi chú: văn bản font cũ (TCVN3/VNI) cần được dán đúng nguyên byte," &
+            vbCrLf & "không phải bị font hiện tại hiển thị sai thành ô vuông/dấu hỏi."
+        lblNote.Font = New Font("Segoe UI", 8, FontStyle.Italic)
+        lblNote.ForeColor = Color.Gray
+        lblNote.Location = New Point(180, 404)
+        lblNote.AutoSize = True
+        Me.Controls.Add(lblNote)
+    End Sub
+
+    Private Function SelectedFromEnc() As MainForm.OutputEncodingType
+        Select Case cboFrom.SelectedIndex
+            Case 1 : Return MainForm.OutputEncodingType.TCVN3
+            Case 2 : Return MainForm.OutputEncodingType.VNIWindows
+            Case Else : Return MainForm.OutputEncodingType.Unicode
+        End Select
+    End Function
+
+    Private Function SelectedToEnc() As MainForm.OutputEncodingType
+        Select Case cboTo.SelectedIndex
+            Case 1 : Return MainForm.OutputEncodingType.TCVN3
+            Case 2 : Return MainForm.OutputEncodingType.VNIWindows
+            Case Else : Return MainForm.OutputEncodingType.Unicode
+        End Select
+    End Function
+
+    Private Sub OnConvertClick(sender As Object, e As EventArgs)
+        Try
+            txtOutput.Text = MainForm.ConvertVietnameseText(txtInput.Text, SelectedFromEnc(), SelectedToEnc())
+        Catch ex As Exception
+            MessageBox.Show("Lỗi khi chuyển đổi: " & ex.Message, "Chuyển đổi mã",
+                MessageBoxButtons.OK, MessageBoxIcon.Error)
+        End Try
+    End Sub
+
+    ''' <summary>Đảo chiều "Từ" ↔ "Sang", đồng thời đưa kết quả hiện tại lên ô gốc để chuyển ngược lại.</summary>
+    Private Sub OnSwapClick(sender As Object, e As EventArgs)
+        Dim fromIdx As Integer = cboFrom.SelectedIndex
+        Dim toIdx As Integer = If(cboTo.SelectedIndex = 0, 0, cboTo.SelectedIndex)
+        ' map cboTo (3 item: Unicode/TCVN3/VNI) → cboFrom (3 item cùng thứ tự)
+        cboFrom.SelectedIndex = toIdx
+        cboTo.SelectedIndex = fromIdx
+
+        If txtOutput.Text.Length > 0 Then
+            txtInput.Text = txtOutput.Text
+            txtOutput.Clear()
+        End If
+    End Sub
+
+    Private Sub OnPasteClick(sender As Object, e As EventArgs)
+        Try
+            If Clipboard.ContainsText() Then txtInput.Text = Clipboard.GetText()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub OnCopyClick(sender As Object, e As EventArgs)
+        Try
+            If txtOutput.Text.Length > 0 Then Clipboard.SetText(txtOutput.Text)
+        Catch
+        End Try
+    End Sub
+
+    Private Sub OnClearClick(sender As Object, e As EventArgs)
+        txtInput.Clear()
+        txtOutput.Clear()
+    End Sub
 End Class
 
 ' ════════════════════════════════════════════════════════════
