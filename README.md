@@ -3,4 +3,4 @@
 - Dung lượng nhỏ gọn, sử dụng đơn giản tương thích nhiều OS Windows.
 - Mã nguồn mở , dễ dàng phát triển theo mục đích riêng của bạn.
 # Tác Giả : CongPhuongInfo@Gmail.com
-# CopyRight©16-06-2026 . All Right Reserved
+# Lịch sử phát triển :
