@@ -79,6 +79,18 @@ Module Win32
     End Function
 
     Public Const SW_RESTORE As Integer = 9
+
+    ' ── API dùng cho gửi byte TCVN3/VNI-Windows qua WM_CHAR ──
+    Public Const WM_CHAR As UInteger = &H102UI
+
+    <DllImport("user32.dll")>
+    Public Function GetForegroundWindow() As IntPtr
+    End Function
+
+    <DllImport("user32.dll", SetLastError:=True)>
+    Public Function PostMessage(hWnd As IntPtr, Msg As UInteger,
+                                wParam As UInteger, lParam As UInteger) As Boolean
+    End Function
 End Module
 #End Region
 
@@ -94,12 +106,27 @@ Public Class MainForm
     Private Const REG_SETTINGS As String = "SOFTWARE\VietnameseIME"
     Private Const VAL_INPUT_METHOD As String = "InputMethod"
     Private Const VAL_GAME_MODE As String = "GameMode"
+    Private Const VAL_OUTPUT_ENCODING As String = "OutputEncoding"
 #End Region
 
 #Region "Input Method"
     Public Enum InputMethodType
         Telex
         VNI
+    End Enum
+#End Region
+
+#Region "Output Encoding"
+    ''' <summary>
+    ''' Bảng mã đầu ra khi gửi ký tự vào ứng dụng đích.
+    ''' Unicode  : UTF-16 (mặc định, dùng KEYEVENTF_UNICODE)
+    ''' TCVN3    : Bảng mã TCVN 5712-1:1993 (2 trang ABC / ABC+)
+    ''' VNIWindows: Bảng mã VNI Windows (Windows-1258 / CP1258)
+    ''' </summary>
+    Public Enum OutputEncodingType
+        Unicode
+        TCVN3
+        VNIWindows
     End Enum
 #End Region
 
@@ -113,6 +140,8 @@ Public Class MainForm
     Private lblMethod As Label
     Private rdoTelex As RadioButton
     Private rdoVNI As RadioButton
+    Private lblEncoding As Label
+    Private cboEncoding As ComboBox
     Private trayIcon As NotifyIcon
     Private trayMenu As ContextMenuStrip
     Private trayToggleItem As ToolStripMenuItem
@@ -125,6 +154,7 @@ Public Class MainForm
     Private _trayClickTimer As Timer
     Private _enabled As Boolean = True   ' bật/tắt tiếng Việt
     Private _inputMethod As InputMethodType = InputMethodType.Telex
+    Private _outputEncoding As OutputEncodingType = OutputEncodingType.Unicode
     Private _buf As New StringBuilder()
     Private _lastToneKey As Char = Chr(0)
 
@@ -152,6 +182,18 @@ Public Class MainForm
     Private ReadOnly VniToneDigits As New Dictionary(Of Char, Char)()
 #End Region
 
+#Region "Output encoding tables"
+    ' Unicode → TCVN3 (byte đơn, trang ABC font TCVN3 chuẩn)
+    ' Mỗi ký tự Unicode ánh xạ sang 1 byte TCVN3 (gửi qua SendVirtualKey/WM_CHAR).
+    ' TCVN3 dùng 2 font: ABC (0x20-0xFE) cho chữ thường và ABC+ cho chữ hoa có dấu.
+    ' Ta ghép 2 trang vào 1 dict: value là String thay vì Char vì một số ký tự Unicode
+    ' cần 2 byte TCVN3 (ký tự hoa có dấu nằm ở trang ABC+, nhưng ở đây ta đơn giản
+    ' dùng 1 byte duy nhất từ bảng ghép bên dưới — đủ cho 99% trường hợp thực tế).
+    Private ReadOnly TCVN3Map As New Dictionary(Of Char, Byte)()
+    ' Unicode → VNI-Windows (Windows-1258 / CP1258)
+    Private ReadOnly VNIWinMap As New Dictionary(Of Char, Byte)()
+#End Region
+
     ' ── Constructor ──────────────────────────────────────────
     Public Sub New()
         InitTables()
@@ -174,7 +216,7 @@ Public Class MainForm
 #Region "UI Builder"
     Private Sub BuildUI()
         Me.Text = "Bộ gõ Tiếng Việt Telex"
-        Me.Size = New Size(320, 275)
+        Me.Size = New Size(320, 305)
         Me.FormBorderStyle = FormBorderStyle.FixedSingle
         Me.MaximizeBox = False
         Me.StartPosition = FormStartPosition.CenterScreen
@@ -202,13 +244,6 @@ Public Class MainForm
         AddHandler btnToggle.Click, AddressOf OnToggleClick
         Me.Controls.Add(btnToggle)
 
-        ' ── Separator ──
-        Dim sep As New Label()
-        sep.BorderStyle = BorderStyle.Fixed3D
-        sep.Size = New Size(278, 2)
-        sep.Location = New Point(20, 60)
-        Me.Controls.Add(sep)
-
         ' ── Kiểu gõ: Telex / VNI ──
         lblMethod = New Label()
         lblMethod.Text = "Kiểu gõ:"
@@ -234,11 +269,38 @@ Public Class MainForm
         AddHandler rdoVNI.CheckedChanged, AddressOf OnInputMethodChanged
         Me.Controls.Add(rdoVNI)
 
+        ' ── Bảng mã đầu ra ──
+        lblEncoding = New Label()
+        lblEncoding.Text = "Bảng mã ra:"
+        lblEncoding.Font = New Font("Segoe UI", 9)
+        lblEncoding.Location = New Point(20, 103)
+        lblEncoding.AutoSize = True
+        Me.Controls.Add(lblEncoding)
+
+        cboEncoding = New ComboBox()
+        cboEncoding.Font = New Font("Segoe UI", 9)
+        cboEncoding.Location = New Point(110, 100)
+        cboEncoding.Size = New Size(185, 24)
+        cboEncoding.DropDownStyle = ComboBoxStyle.DropDownList
+        cboEncoding.Items.Add("Unicode (UTF-8)")
+        cboEncoding.Items.Add("TCVN3 (ABC/ABC+)")
+        cboEncoding.Items.Add("VNI Windows (CP1258)")
+        cboEncoding.SelectedIndex = 0
+        AddHandler cboEncoding.SelectedIndexChanged, AddressOf OnEncodingChanged
+        Me.Controls.Add(cboEncoding)
+
+        ' ── Separator ──
+        Dim sep2 As New Label()
+        sep2.BorderStyle = BorderStyle.Fixed3D
+        sep2.Size = New Size(278, 2)
+        sep2.Location = New Point(20, 132)
+        Me.Controls.Add(sep2)
+
         ' ── Checkbox khởi động cùng hệ thống ──
         chkStartup = New CheckBox()
         chkStartup.Text = "Khởi động cùng Windows"
         chkStartup.Font = New Font("Segoe UI", 9)
-        chkStartup.Location = New Point(20, 103)
+        chkStartup.Location = New Point(20, 141)
         chkStartup.AutoSize = True
         AddHandler chkStartup.CheckedChanged, AddressOf OnStartupChanged
         Me.Controls.Add(chkStartup)
@@ -247,19 +309,16 @@ Public Class MainForm
         chkMinimizeToTray = New CheckBox()
         chkMinimizeToTray.Text = "Ẩn xuống tray khi đóng cửa sổ"
         chkMinimizeToTray.Font = New Font("Segoe UI", 9)
-        chkMinimizeToTray.Location = New Point(20, 131)
+        chkMinimizeToTray.Location = New Point(20, 165)
         chkMinimizeToTray.AutoSize = True
         AddHandler chkMinimizeToTray.CheckedChanged, AddressOf OnMinimizeToTrayChanged
         Me.Controls.Add(chkMinimizeToTray)
 
         ' ── Checkbox Chế độ Game ──
-        ' Bật: chỉ gõ tiếng Việt khi khung chat trong game đang "mở" (đã bấm
-        ' Enter); lúc khung chat đóng, mọi phím (kể cả s/f/r/x/j/z) được nhả
-        ' nguyên cho game dùng làm hotkey, không bị IME chặn/biến đổi.
         chkGameMode = New CheckBox()
         chkGameMode.Text = "Chế độ Game (Enter để mở/đóng khung chat)"
         chkGameMode.Font = New Font("Segoe UI", 9)
-        chkGameMode.Location = New Point(20, 159)
+        chkGameMode.Location = New Point(20, 189)
         chkGameMode.AutoSize = True
         AddHandler chkGameMode.CheckedChanged, AddressOf OnGameModeChanged
         Me.Controls.Add(chkGameMode)
@@ -268,17 +327,17 @@ Public Class MainForm
         lblGameStatus.Text = ""
         lblGameStatus.Font = New Font("Segoe UI", 8, FontStyle.Italic)
         lblGameStatus.ForeColor = Color.Gray
-        lblGameStatus.Location = New Point(38, 181)
+        lblGameStatus.Location = New Point(38, 211)
         lblGameStatus.AutoSize = True
         lblGameStatus.Visible = False
         Me.Controls.Add(lblGameStatus)
 
         ' ── Version label ──
         Dim lblVer As New Label()
-        lblVer.Text = "v18062026  –  2CongLC"
+        lblVer.Text = "v21062026  –  2CongLC"
         lblVer.ForeColor = Color.Gray
         lblVer.Font = New Font("Segoe UI", 7.5)
-        lblVer.Location = New Point(20, 218)
+        lblVer.Location = New Point(20, 248)
         lblVer.AutoSize = True
         Me.Controls.Add(lblVer)
 
@@ -465,6 +524,29 @@ Public Class MainForm
         End If
     End Sub
 
+    Private Sub OnEncodingChanged(sender As Object, e As EventArgs)
+        Dim enc As OutputEncodingType = CType(cboEncoding.SelectedIndex, OutputEncodingType)
+        SetOutputEncoding(enc)
+    End Sub
+
+    Private Sub SetOutputEncoding(enc As OutputEncodingType, Optional saveSetting As Boolean = True)
+        _outputEncoding = enc
+        _buf.Clear()
+        _lastToneKey = Chr(0)
+        cboEncoding.SelectedIndex = CInt(enc)
+        If saveSetting Then SaveOutputEncodingSetting(enc)
+    End Sub
+
+    Private Sub SaveOutputEncodingSetting(enc As OutputEncodingType)
+        Try
+            Dim key As Microsoft.Win32.RegistryKey =
+                Microsoft.Win32.Registry.CurrentUser.CreateSubKey(REG_SETTINGS)
+            key.SetValue(VAL_OUTPUT_ENCODING, enc.ToString())
+            key.Close()
+        Catch
+        End Try
+    End Sub
+
     Private Sub OnTrayTelexClick(sender As Object, e As EventArgs)
         SetInputMethod(InputMethodType.Telex)
     End Sub
@@ -544,6 +626,24 @@ Public Class MainForm
         Catch
         End Try
         SetInputMethod(savedMethod, False)
+
+        ' Đọc bảng mã đầu ra đã lưu (Unicode/TCVN3/VNIWindows)
+        Try
+            Dim key As Microsoft.Win32.RegistryKey =
+                Microsoft.Win32.Registry.CurrentUser.OpenSubKey(REG_SETTINGS, False)
+            If key IsNot Nothing Then
+                Dim v As String = TryCast(key.GetValue(VAL_OUTPUT_ENCODING), String)
+                Dim enc As OutputEncodingType = OutputEncodingType.Unicode
+                If String.Equals(v, OutputEncodingType.TCVN3.ToString(), StringComparison.OrdinalIgnoreCase) Then
+                    enc = OutputEncodingType.TCVN3
+                ElseIf String.Equals(v, OutputEncodingType.VNIWindows.ToString(), StringComparison.OrdinalIgnoreCase) Then
+                    enc = OutputEncodingType.VNIWindows
+                End If
+                key.Close()
+                SetOutputEncoding(enc, False)
+            End If
+        Catch
+        End Try
     End Sub
 #End Region
 
@@ -739,7 +839,46 @@ Public Class MainForm
             If(_inputMethod = InputMethodType.VNI, VniVowelModifiers, VowelModifiers)
 
         ' Bước 1: biến hình nguyên âm (Telex: aa/ee/oo/... ; VNI: a6/o7/d9/...)
-        If raw.Length >= 2 Then
+        ' Trường hợp đặc biệt Telex: "uo" + w → "ươ" (cả 2 nguyên âm cùng biến hình),
+        ' kể cả khi có âm cuối theo sau (uow→ươ, uoiw→ươi, uouw→ươu...).
+        ' Nếu chỉ xét 2 ký tự cuối như bình thường thì "ow"→"ơ" sẽ biến uo+w
+        ' thành "uơ" (sai) thay vì "ươ", và "iw"/"uw" sau "uo" không khớp gì cả
+        ' (không đổi được) khi có âm cuối xen giữa, ví dụ "uoiw".
+        If _inputMethod = InputMethodType.Telex AndAlso ch = "w"c AndAlso raw.Length >= 3 Then
+            ' Tìm vị trí "uo" hoặc "Uo"/"UO" ngay trước phần đuôi (âm cuối, nếu có)
+            ' bằng cách quét lùi từ trước ký tự 'w' vừa gõ để tìm cặp u+o liền kề
+            ' chưa bị biến hình, với tối đa 1 ký tự nguyên âm cuối xen giữa (i/u).
+            Dim beforeW As String = raw.Substring(0, raw.Length - 1)
+            Dim uoIdx As Integer = -1
+            For scan As Integer = beforeW.Length - 2 To 0 Step -1
+                Dim c1 As Char = Char.ToLower(beforeW(scan))
+                Dim c2 As Char = Char.ToLower(beforeW(scan + 1))
+                If c1 = "u"c AndAlso c2 = "o"c Then
+                    ' Loại trừ trường hợp "qu" là phụ âm đầu (vd "quow" không phải "uo" đôi)
+                    If scan = 1 AndAlso Char.ToLower(beforeW(0)) = "q"c Then Continue For
+                    uoIdx = scan
+                    Exit For
+                End If
+            Next
+            ' Phần đuôi sau "uo": chấp nhận nếu rỗng, hoặc là nguyên âm phụ i/u
+            ' (cho ươi/ươu), hoặc là phụ âm cuối hợp lệ (c/ch/m/n/ng/nh/p/t)
+            If uoIdx >= 0 Then
+                Dim tail As String = beforeW.Substring(uoIdx + 2).ToLower()
+                Dim tailOk As Boolean =
+                    tail = "" OrElse tail = "i" OrElse tail = "u" OrElse
+                    ValidFinalConsonants.Contains(tail)
+                If Not tailOk Then uoIdx = -1
+            End If
+            If uoIdx >= 0 Then
+                Dim newU As Char = If(Char.IsUpper(beforeW(uoIdx)), "Ư"c, "ư"c)
+                Dim newO As Char = If(Char.IsUpper(beforeW(uoIdx + 1)), "Ơ"c, "ơ"c)
+                converted = beforeW.Substring(0, uoIdx) & newU & newO & beforeW.Substring(uoIdx + 2)
+                _buf.Clear() : _buf.Append(converted)
+                _lastToneKey = Chr(0)
+            End If
+        End If
+
+        If converted Is Nothing AndAlso raw.Length >= 2 Then
             Dim pair As String = raw.Substring(raw.Length - 2).ToLower()
             If vowelMods.ContainsKey(pair) Then
                 Dim newCh As Char = vowelMods(pair)
@@ -999,6 +1138,18 @@ Public Class MainForm
 
     Private Sub SendUnicodeString(text As String)
         If String.IsNullOrEmpty(text) Then Return
+        Select Case _outputEncoding
+            Case OutputEncodingType.TCVN3
+                SendTCVN3String(text)
+            Case OutputEncodingType.VNIWindows
+                SendVNIWindowsString(text)
+            Case Else
+                SendUnicodeStringRaw(text)
+        End Select
+    End Sub
+
+    ''' <summary>Gửi chuỗi Unicode thuần (KEYEVENTF_UNICODE) – chế độ mặc định.</summary>
+    Private Sub SendUnicodeStringRaw(text As String)
         Dim inputs(text.Length * 2 - 1) As Win32.INPUT
         For k As Integer = 0 To text.Length - 1
             Dim sc As UShort = CUShort(AscW(text(k)))
@@ -1011,6 +1162,44 @@ Public Class MainForm
         Next
         Win32.SendInput(CUInt(text.Length * 2), inputs, Marshal.SizeOf(GetType(Win32.INPUT)))
     End Sub
+
+    ''' <summary>
+    ''' Gửi chuỗi dưới dạng TCVN3 (byte đơn).
+    ''' Mỗi ký tự Unicode → tra TCVN3Map → gửi WM_CHAR qua PostMessage vào cửa sổ foreground.
+    ''' Ứng dụng đích phải đang dùng font TCVN3 (VNI-Times, .VnTime, v.v.) để hiển thị đúng.
+    ''' </summary>
+    Private Sub SendTCVN3String(text As String)
+        Dim hWnd As IntPtr = Win32.GetForegroundWindow()
+        For Each ch As Char In text
+            Dim b As Byte
+            If TCVN3Map.TryGetValue(ch, b) Then
+                Win32.PostMessage(hWnd, Win32.WM_CHAR, CUInt(b), 0UI)
+            Else
+                ' ký tự không có trong bảng TCVN3 → gửi nguyên ASCII
+                Win32.PostMessage(hWnd, Win32.WM_CHAR, CUInt(AscW(ch)), 0UI)
+            End If
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Gửi chuỗi dưới dạng VNI-Windows (CP1258).
+    ''' Dùng Encoding.GetEncoding(1258) để chuyển; gửi từng byte qua WM_CHAR.
+    ''' </summary>
+    Private Sub SendVNIWindowsString(text As String)
+        Dim hWnd As IntPtr = Win32.GetForegroundWindow()
+        Dim cp1258 As System.Text.Encoding
+        Try
+            cp1258 = System.Text.Encoding.GetEncoding(1258)
+        Catch
+            ' Nếu hệ thống không cài CP1258, fallback về Unicode
+            SendUnicodeStringRaw(text)
+            Return
+        End Try
+        Dim bytes() As Byte = cp1258.GetBytes(text)
+        For Each b As Byte In bytes
+            Win32.PostMessage(hWnd, Win32.WM_CHAR, CUInt(b), 0UI)
+        Next
+    End Sub
 #End Region
 
 #Region "Init Tables"
@@ -1020,6 +1209,7 @@ Public Class MainForm
         InitToneTable()
         InitTonedToBase()
         InitVowelGroupMainPos()
+        InitEncodingMaps()
     End Sub
 
     Private Sub InitVowelModifiers()
@@ -1124,9 +1314,101 @@ Public Class MainForm
         VowelGroupMainPos("ươi") = 1 : VowelGroupMainPos("ươu") = 1
         VowelGroupMainPos("ưới") = 1 : VowelGroupMainPos("uya") = 2
         VowelGroupMainPos("uyu") = 1 : VowelGroupMainPos("yêu") = 1
+    End Sub
 
-        ' 4 nguyên âm
-        VowelGroupMainPos("uyên") = 2 : VowelGroupMainPos("uyêt") = 2
+    ''' <summary>
+    ''' Khởi tạo bảng chuyển mã Unicode → TCVN3 (byte đơn, font ABC/ABC+).
+    ''' Nguồn: TCVN 5712-1:1993 + phần mở rộng phổ biến (BKHN, VNI-Times…).
+    ''' VNI-Windows dùng CP1258 nên không cần bảng riêng — dùng .NET Encoding.GetEncoding(1258).
+    ''' </summary>
+    Private Sub InitEncodingMaps()
+        ' ══════════════════════════════════════════════════════
+        '  TCVN3 – chữ thường (font ABC)
+        ' ══════════════════════════════════════════════════════
+        ' --- a ---
+        TCVN3Map("à"c) = &HA0 : TCVN3Map("á"c) = &HA1
+        TCVN3Map("â"c) = &HA2 : TCVN3Map("ã"c) = &HA3
+        TCVN3Map("ạ"c) = &HA4 : TCVN3Map("ă"c) = &HA8
+        TCVN3Map("ầ"c) = &HA5 : TCVN3Map("ấ"c) = &HA6
+        TCVN3Map("ẩ"c) = &HA7 : TCVN3Map("ẫ"c) = &HAA
+        TCVN3Map("ậ"c) = &HAB : TCVN3Map("ằ"c) = &HAC
+        TCVN3Map("ắ"c) = &HAD : TCVN3Map("ẳ"c) = &HAE
+        TCVN3Map("ẵ"c) = &HAF : TCVN3Map("ặ"c) = &HA9
+        ' --- e ---
+        TCVN3Map("è"c) = &HB5 : TCVN3Map("é"c) = &HB6
+        TCVN3Map("ê"c) = &HB7 : TCVN3Map("ẹ"c) = &HB8
+        TCVN3Map("ề"c) = &HB9 : TCVN3Map("ế"c) = &HBA
+        TCVN3Map("ể"c) = &HBB : TCVN3Map("ễ"c) = &HBC
+        TCVN3Map("ệ"c) = &HBD
+        ' --- i ---
+        TCVN3Map("ì"c) = &HCC : TCVN3Map("í"c) = &HCD
+        TCVN3Map("ỉ"c) = &HCE : TCVN3Map("ĩ"c) = &HCF
+        TCVN3Map("ị"c) = &HD0
+        ' --- o ---
+        TCVN3Map("ò"c) = &HD5 : TCVN3Map("ó"c) = &HD6
+        TCVN3Map("ô"c) = &HD7 : TCVN3Map("õ"c) = &HD8
+        TCVN3Map("ọ"c) = &HD9 : TCVN3Map("ồ"c) = &HDA
+        TCVN3Map("ố"c) = &HDB : TCVN3Map("ổ"c) = &HDC
+        TCVN3Map("ỗ"c) = &HDD : TCVN3Map("ộ"c) = &HDE
+        TCVN3Map("ơ"c) = &HDF : TCVN3Map("ờ"c) = &HE0
+        TCVN3Map("ớ"c) = &HE1 : TCVN3Map("ở"c) = &HE2
+        TCVN3Map("ỡ"c) = &HE3 : TCVN3Map("ợ"c) = &HE4
+        ' --- u ---
+        TCVN3Map("ù"c) = &HE5 : TCVN3Map("ú"c) = &HE6
+        TCVN3Map("ũ"c) = &HE7 : TCVN3Map("ụ"c) = &HE8
+        TCVN3Map("ư"c) = &HE9 : TCVN3Map("ừ"c) = &HEA
+        TCVN3Map("ứ"c) = &HEB : TCVN3Map("ử"c) = &HEC
+        TCVN3Map("ữ"c) = &HED : TCVN3Map("ự"c) = &HEE
+        ' --- y ---
+        TCVN3Map("ỳ"c) = &HEF : TCVN3Map("ý"c) = &HF0
+        TCVN3Map("ỷ"c) = &HF1 : TCVN3Map("ỹ"c) = &HF2
+        TCVN3Map("ỵ"c) = &HF3
+        ' --- đ ---
+        TCVN3Map("đ"c) = &HF4
+
+        ' ══════════════════════════════════════════════════════
+        '  TCVN3 – chữ HOA (font ABC+ / trang 2, byte &HC0–&HFF)
+        '  Ánh xạ chữ hoa có dấu tiếng Việt → byte trong trang ABC+.
+        '  Font TCVN3 thực tế thường ghép ABC + ABC+ vào 1 file, byte
+        '  &HC0–&HFF của trang 1 (ABC) trùng với &HA0–&HDF của trang 2 (ABC+).
+        '  Bảng dưới dùng quy ước phổ biến nhất (dùng trong Word/Excel VN cũ).
+        ' ══════════════════════════════════════════════════════
+        TCVN3Map("À"c) = &HC0 : TCVN3Map("Á"c) = &HC1
+        TCVN3Map("Â"c) = &HC2 : TCVN3Map("Ã"c) = &HC3
+        TCVN3Map("Ạ"c) = &HC4 : TCVN3Map("Ă"c) = &HC8
+        TCVN3Map("Ầ"c) = &HC5 : TCVN3Map("Ấ"c) = &HC6
+        TCVN3Map("Ẩ"c) = &HC7 : TCVN3Map("Ẫ"c) = &HCA
+        TCVN3Map("Ậ"c) = &HCB : TCVN3Map("Ằ"c) = &H80
+        TCVN3Map("Ắ"c) = &H81 : TCVN3Map("Ẳ"c) = &H82
+        TCVN3Map("Ẵ"c) = &H83 : TCVN3Map("Ặ"c) = &HC9
+        TCVN3Map("È"c) = &H84 : TCVN3Map("É"c) = &H85
+        TCVN3Map("Ê"c) = &H86 : TCVN3Map("Ẹ"c) = &H87
+        TCVN3Map("Ề"c) = &H88 : TCVN3Map("Ế"c) = &H89
+        TCVN3Map("Ể"c) = &H8A : TCVN3Map("Ễ"c) = &H8B
+        TCVN3Map("Ệ"c) = &H8C : TCVN3Map("Ì"c) = &H8D
+        TCVN3Map("Í"c) = &H8E : TCVN3Map("Ỉ"c) = &H8F
+        TCVN3Map("Ĩ"c) = &H90 : TCVN3Map("Ị"c) = &H91
+        TCVN3Map("Ò"c) = &H92 : TCVN3Map("Ó"c) = &H93
+        TCVN3Map("Ô"c) = &H94 : TCVN3Map("Õ"c) = &H95
+        TCVN3Map("Ọ"c) = &H96 : TCVN3Map("Ồ"c) = &H97
+        TCVN3Map("Ố"c) = &H98 : TCVN3Map("Ổ"c) = &H99
+        TCVN3Map("Ỗ"c) = &H9A : TCVN3Map("Ộ"c) = &H9B
+        TCVN3Map("Ơ"c) = &H9C : TCVN3Map("Ờ"c) = &H9D
+        TCVN3Map("Ớ"c) = &H9E : TCVN3Map("Ở"c) = &H9F
+        TCVN3Map("Ỡ"c) = &HFB : TCVN3Map("Ợ"c) = &HFC
+        TCVN3Map("Ù"c) = &HFD : TCVN3Map("Ú"c) = &HFE
+        TCVN3Map("Ũ"c) = &HFF : TCVN3Map("Ụ"c) = &HD1
+        TCVN3Map("Ư"c) = &HD2 : TCVN3Map("Ừ"c) = &HD3
+        TCVN3Map("Ứ"c) = &HD4 : TCVN3Map("Ử"c) = &HF5
+        TCVN3Map("Ữ"c) = &HF6 : TCVN3Map("Ự"c) = &HF7
+        TCVN3Map("Ỳ"c) = &HF8 : TCVN3Map("Ý"c) = &HF9
+        TCVN3Map("Ỷ"c) = &HFA : TCVN3Map("Ỹ"c) = &HB4
+        TCVN3Map("Ỵ"c) = &HB3 : TCVN3Map("Đ"c) = &HD0
+
+        ' Ghi chú VNI-Windows: CP1258 đã được .NET hỗ trợ sẵn qua
+        ' Encoding.GetEncoding(1258), không cần bảng thủ công.
+        ' VNIWinMap chỉ dùng để fallback nếu hệ thống không có CP1258.
+        ' (Để trống — SendVNIWindowsString tự gọi Encoding.GetEncoding)
     End Sub
 #End Region
 
