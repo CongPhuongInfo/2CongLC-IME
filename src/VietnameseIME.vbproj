@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>VietnameseIME</RootNamespace>
+    <AssemblyName>VietnameseIME</AssemblyName>
+    <OptionStrict>On</OptionStrict>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <Nullable>Disable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    ONNX Runtime: chỉ cần khai báo PackageReference, dotnet tự tải cả DLL
+    quản lý (managed) lẫn native runtime (onnxruntime.dll) đúng cho
+    RuntimeIdentifier khai báo ở trên — không cần setup_onnx.bat/nuget.exe/
+    netstandard.dll thủ công như bản build bằng vbc.exe nữa.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+  </ItemGroup>
+
+  <!--
+    3 file dữ liệu cần cho tính năng chính tả/gợi ý ngữ cảnh:
+    - Từ điển âm tiết: nhúng vào exe làm resource (giống cách cũ)
+    - Model ONNX + vocab: copy tự động ra thư mục output mỗi lần build,
+      không cần tự tay chép nữa.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="vietnamese_syllables.txt">
+      <LogicalName>VietnameseIME.vietnamese_syllables.txt</LogicalName>
+    </EmbeddedResource>
+    <None Include="vn_context_lm.onnx">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="vn_vocab.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

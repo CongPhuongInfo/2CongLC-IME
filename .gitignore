@@ -1,0 +1,3 @@
+# .NET build artifacts (tao tu dong khi chay dotnet publish/build)
+src/bin/
+src/obj/

@@ -79,6 +79,37 @@ Module Win32
     End Function
 
     Public Const SW_RESTORE As Integer = 9
+    Public Const SW_SHOWNOACTIVATE As Integer = 4
+
+    ' ── API dùng để lấy vị trí con trỏ nhập liệu (caret) của app đích ──
+    ' Global hook không nằm cùng thread message queue với app đích nên phải
+    ' AttachThreadInput tạm thời để GetCaretPos trả về đúng toạ độ, sau đó
+    ' gỡ ra ngay để không ảnh hưởng tới input của app đó.
+    <StructLayout(LayoutKind.Sequential)>
+    Public Structure POINTAPI
+        Public X As Integer
+        Public Y As Integer
+    End Structure
+
+    <DllImport("user32.dll")>
+    Public Function GetWindowThreadProcessId(hWnd As IntPtr, ByRef processId As UInteger) As UInteger
+    End Function
+
+    <DllImport("user32.dll")>
+    Public Function AttachThreadInput(idAttach As UInteger, idAttachTo As UInteger, fAttach As Boolean) As Boolean
+    End Function
+
+    <DllImport("user32.dll")>
+    Public Function GetCaretPos(ByRef lpPoint As POINTAPI) As Boolean
+    End Function
+
+    <DllImport("user32.dll")>
+    Public Function ClientToScreen(hWnd As IntPtr, ByRef lpPoint As POINTAPI) As Boolean
+    End Function
+
+    <DllImport("kernel32.dll")>
+    Public Function GetCurrentThreadId() As UInteger
+    End Function
 
     ' ── API dùng cho gửi byte TCVN3/VNI-Windows qua WM_CHAR ──
     Public Const WM_CHAR As UInteger = &H102UI
@@ -107,6 +138,7 @@ Public Class MainForm
     Private Const VAL_INPUT_METHOD As String = "InputMethod"
     Private Const VAL_GAME_MODE As String = "GameMode"
     Private Const VAL_OUTPUT_ENCODING As String = "OutputEncoding"
+    Private Const VAL_SPELLCHECK As String = "SpellCheck"
 #End Region
 
 #Region "Input Method"
@@ -134,6 +166,7 @@ Public Class MainForm
     Private chkStartup As CheckBox
     Private chkMinimizeToTray As CheckBox
     Private chkGameMode As CheckBox
+    Private chkSpellCheck As CheckBox
     Private lblGameStatus As Label
     Private lblStatus As Label
     Private btnToggle As Button
@@ -163,6 +196,18 @@ Public Class MainForm
     ' bấm Enter); còn lại nhả nguyên cho game dùng làm hotkey (R, F, S, X...).
     Private _gameModeEnabled As Boolean = False
     Private _chatOpenViaEnter As Boolean = False
+
+    ' ── Kiểm tra lỗi dấu/chính tả ──
+    Private _spellCheckEnabled As Boolean = True
+    Private ReadOnly ValidSyllables As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+    Private _spellPopup As SpellWarningPopup
+
+    ' ── Model ngữ cảnh ONNX (phát hiện nhầm âm/dấu theo ngữ cảnh câu) ──
+    ' Nothing nếu không nạp được model — tính năng này là optional add-on,
+    ' không có cũng không ảnh hưởng tới các tính năng còn lại của IME.
+    Private _contextChecker As OnnxContextChecker
+    Private _histPrev2 As String = ""
+    Private _histPrev1 As String = ""
 #End Region
 
 #Region "Telex tables"
@@ -201,6 +246,8 @@ Public Class MainForm
     ' ── Constructor ──────────────────────────────────────────
     Public Sub New()
         InitTables()
+        LoadDictionary()
+        LoadContextModel()
         BuildUI()
         BuildTrayIcon()
         LoadSettings()
@@ -220,7 +267,7 @@ Public Class MainForm
 #Region "UI Builder"
     Private Sub BuildUI()
         Me.Text = "Bộ gõ Tiếng Việt Telex"
-        Me.Size = New Size(320, 335)
+        Me.Size = New Size(320, 365)
         Me.FormBorderStyle = FormBorderStyle.FixedSingle
         Me.MaximizeBox = False
         Me.StartPosition = FormStartPosition.CenterScreen
@@ -336,11 +383,21 @@ Public Class MainForm
         lblGameStatus.Visible = False
         Me.Controls.Add(lblGameStatus)
 
+        ' ── Checkbox kiểm tra lỗi dấu/chính tả ──
+        chkSpellCheck = New CheckBox()
+        chkSpellCheck.Text = "Cảnh báo gõ sai dấu/chính tả"
+        chkSpellCheck.Font = New Font("Segoe UI", 9)
+        chkSpellCheck.Location = New Point(20, 227)
+        chkSpellCheck.AutoSize = True
+        chkSpellCheck.Checked = True
+        AddHandler chkSpellCheck.CheckedChanged, AddressOf OnSpellCheckChanged
+        Me.Controls.Add(chkSpellCheck)
+
         ' ── Nút mở cửa sổ Chuyển đổi mã ──
         Dim btnConvert As New Button()
         btnConvert.Text = "Chuyển đổi mã..."
         btnConvert.Size = New Size(278, 30)
-        btnConvert.Location = New Point(20, 238)
+        btnConvert.Location = New Point(20, 258)
         btnConvert.FlatStyle = FlatStyle.Flat
         btnConvert.BackColor = Color.FromArgb(0, 120, 215)
         btnConvert.ForeColor = Color.White
@@ -351,10 +408,10 @@ Public Class MainForm
 
         ' ── Version label ──
         Dim lblVer As New Label()
-        lblVer.Text = "v21062026  –  2CongLC"
+        lblVer.Text = "v24072026  –  2CongLC"
         lblVer.ForeColor = Color.Gray
         lblVer.Font = New Font("Segoe UI", 7.5)
-        lblVer.Location = New Point(20, 278)
+        lblVer.Location = New Point(20, 308)
         lblVer.AutoSize = True
         Me.Controls.Add(lblVer)
 
@@ -515,6 +572,22 @@ Public Class MainForm
 
     Private Sub OnMinimizeToTrayChanged(sender As Object, e As EventArgs)
         ' giá trị được đọc trực tiếp từ checkbox khi cần
+    End Sub
+
+    Private Sub OnSpellCheckChanged(sender As Object, e As EventArgs)
+        _spellCheckEnabled = chkSpellCheck.Checked
+        If _spellPopup IsNot Nothing AndAlso Not _spellPopup.IsDisposed Then _spellPopup.Hide()
+        SaveSpellCheckSetting(_spellCheckEnabled)
+    End Sub
+
+    Private Sub SaveSpellCheckSetting(enabled As Boolean)
+        Try
+            Dim key As Microsoft.Win32.RegistryKey =
+                Microsoft.Win32.Registry.CurrentUser.CreateSubKey(REG_SETTINGS)
+            key.SetValue(VAL_SPELLCHECK, If(enabled, "1", "0"))
+            key.Close()
+        Catch
+        End Try
     End Sub
 
     Private Sub OnGameModeChanged(sender As Object, e As EventArgs)
@@ -727,7 +800,202 @@ Public Class MainForm
             End If
         Catch
         End Try
+
+        ' Đọc trạng thái cảnh báo chính tả đã lưu, mặc định BẬT nếu chưa có
+        Try
+            Dim key As Microsoft.Win32.RegistryKey =
+                Microsoft.Win32.Registry.CurrentUser.OpenSubKey(REG_SETTINGS, False)
+            If key IsNot Nothing Then
+                Dim sc As String = TryCast(key.GetValue(VAL_SPELLCHECK), String)
+                chkSpellCheck.Checked = (sc <> "0")
+                key.Close()
+            End If
+        Catch
+        End Try
+        _spellCheckEnabled = chkSpellCheck.Checked
     End Sub
+#End Region
+
+#Region "Spell Checker"
+    ''' <summary>
+    ''' Nạp danh sách âm tiết tiếng Việt hợp lệ. Ưu tiên đọc từ resource nhúng
+    ''' sẵn trong exe (embedded qua /resource: khi build); nếu không nhúng
+    ''' được (ví dụ build tay bằng vbc.exe không thêm cờ đó) thì thử đọc file
+    ''' "vietnamese_syllables.txt" đặt cùng thư mục exe làm phương án dự phòng.
+    ''' Nếu cả 2 đều thất bại, ValidSyllables rỗng → CheckAndWarnSpelling sẽ
+    ''' tự động bỏ qua kiểm tra (tránh báo sai hàng loạt).
+    ''' </summary>
+    Private Sub LoadDictionary()
+        Try
+            Dim asm = Reflection.Assembly.GetExecutingAssembly()
+            For Each resName In asm.GetManifestResourceNames()
+                If resName.EndsWith("vietnamese_syllables.txt", StringComparison.OrdinalIgnoreCase) Then
+                    Using stream = asm.GetManifestResourceStream(resName)
+                        If stream IsNot Nothing Then
+                            Using reader As New IO.StreamReader(stream, Encoding.UTF8)
+                                Do Until reader.EndOfStream
+                                    Dim line As String = reader.ReadLine()
+                                    If Not String.IsNullOrWhiteSpace(line) Then ValidSyllables.Add(line.Trim())
+                                Loop
+                            End Using
+                        End If
+                    End Using
+                    Exit For
+                End If
+            Next
+        Catch
+        End Try
+
+        If ValidSyllables.Count = 0 Then
+            Try
+                Dim path As String = IO.Path.Combine(Application.StartupPath, "vietnamese_syllables.txt")
+                If IO.File.Exists(path) Then
+                    For Each line In IO.File.ReadAllLines(path, Encoding.UTF8)
+                        If Not String.IsNullOrWhiteSpace(line) Then ValidSyllables.Add(line.Trim())
+                    Next
+                End If
+            Catch
+            End Try
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Kiểm tra 1 âm tiết có nằm trong từ điển không. Bỏ qua (coi như hợp lệ)
+    ''' với chuỗi rỗng, 1 ký tự, hoặc có chứa chữ số — để tránh báo sai với
+    ''' viết tắt, số, hoặc trường hợp chưa đủ dữ liệu để đánh giá.
+    ''' </summary>
+    Private Function IsValidSyllable(word As String) As Boolean
+        If String.IsNullOrEmpty(word) OrElse word.Length = 1 Then Return True
+        For Each c In word
+            If Char.IsDigit(c) Then Return True
+        Next
+        Return ValidSyllables.Contains(word.ToLowerInvariant())
+    End Function
+
+    ''' <summary>
+    ''' Nạp model ONNX ngữ cảnh (nếu có). Thất bại thì bỏ qua lặng lẽ — đây là
+    ''' tính năng tăng cường, không phải phụ thuộc bắt buộc của IME.
+    ''' </summary>
+    Private Sub LoadContextModel()
+        Try
+            Dim modelPath = IO.Path.Combine(Application.StartupPath, "vn_context_lm.onnx")
+            Dim vocabPath = IO.Path.Combine(Application.StartupPath, "vn_vocab.txt")
+            _contextChecker = New OnnxContextChecker(modelPath, vocabPath)
+        Catch
+            _contextChecker = Nothing
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Kiểm tra âm tiết vừa gõ xong theo 2 bước:
+    ''' 1) Có trong từ điển không — nếu không, cảnh báo "sai chính tả" (đỏ).
+    ''' 2) Nếu có trong từ điển, thử dùng model ngữ cảnh ONNX xem có ứng viên
+    '''    dễ nhầm nào (s/x, tr/ch, d/gi/r, l/n) hợp ngữ cảnh hơn hẳn không —
+    '''    nếu có, gợi ý (xanh), vì đây là loại lỗi từ điển không bắt được
+    '''    (cả 2 từ đều có nghĩa, VD "chia sẻ" vs "chia sẽ").
+    ''' Chỉ cảnh báo/gợi ý — không tự sửa, vì tự ý sửa chữ người dùng đang gõ
+    ''' ở app khác rủi ro cao hơn lợi ích.
+    ''' </summary>
+    Private Sub CheckAndWarnSpelling(word As String)
+        If String.IsNullOrWhiteSpace(word) Then Return
+
+        If _spellCheckEnabled AndAlso ValidSyllables.Count > 0 AndAlso Not IsValidSyllable(word) Then
+            ShowSpellPopup(word, Nothing)
+            UpdateWordHistory(word)
+            Return
+        End If
+
+        If _spellCheckEnabled AndAlso _contextChecker IsNot Nothing Then
+            Dim suggestion = CheckContextConfusion(word)
+            If suggestion IsNot Nothing Then ShowSpellPopup(word, suggestion)
+        End If
+
+        UpdateWordHistory(word)
+    End Sub
+
+    ''' <summary>Ghi lại 2 âm tiết gần nhất làm ngữ cảnh cho model ONNX.</summary>
+    Private Sub UpdateWordHistory(word As String)
+        _histPrev2 = _histPrev1
+        _histPrev1 = word
+    End Sub
+
+    ''' <summary>
+    ''' So sánh xác suất ngữ cảnh giữa từ vừa gõ và các ứng viên dễ nhầm (chỉ
+    ''' xét ứng viên cũng là từ có nghĩa trong từ điển). Trả về từ gợi ý nếu
+    ''' có ứng viên vượt trội rõ rệt (≥ 4 lần xác suất), ngược lại Nothing.
+    ''' Ngưỡng 4 lần là để giảm phiền nhiễu vì model hiện tại còn khá non
+    ''' (train nhanh trên tập nhỏ) — nên chỉ báo khi chênh lệch thật rõ.
+    ''' </summary>
+    Private Function CheckContextConfusion(word As String) As String
+        Dim candidates = OnnxContextChecker.GenerateConfusionCandidates(word)
+        If candidates.Count = 0 Then Return Nothing
+
+        Try
+            Dim wordProb As Single = _contextChecker.ProbabilityOf(_histPrev2, _histPrev1, word)
+            Dim bestCandidate As String = Nothing
+            Dim bestProb As Single = wordProb
+
+            For Each cand In candidates
+                If Not IsValidSyllable(cand) Then Continue For
+                Dim p As Single = _contextChecker.ProbabilityOf(_histPrev2, _histPrev1, cand)
+                If p > bestProb Then
+                    bestProb = p
+                    bestCandidate = cand
+                End If
+            Next
+
+            If bestCandidate IsNot Nothing AndAlso bestProb >= wordProb * 4.0F AndAlso bestProb > 0.01F Then
+                Return bestCandidate
+            End If
+        Catch
+            ' Lỗi khi chạy inference (model hỏng, v.v.) — bỏ qua, không làm gián đoạn gõ
+        End Try
+        Return Nothing
+    End Function
+
+    ''' <summary>Hiện popup dùng chung cho cả 2 loại: sai chính tả (suggestion=Nothing)
+    ''' và gợi ý ngữ cảnh (suggestion có giá trị).</summary>
+    Private Sub ShowSpellPopup(word As String, suggestion As String)
+        Dim pos As Point = GetCaretScreenPos()
+        If _spellPopup Is Nothing OrElse _spellPopup.IsDisposed Then
+            _spellPopup = New SpellWarningPopup()
+        End If
+        _spellPopup.ShowWarning(word, suggestion, pos)
+    End Sub
+
+    ''' <summary>
+    ''' Lấy toạ độ màn hình của con trỏ nhập liệu (caret) trong cửa sổ foreground
+    ''' hiện tại. Vì IME chạy qua global hook (khác thread message queue với app
+    ''' đích), phải AttachThreadInput tạm thời thì GetCaretPos mới trả đúng giá
+    ''' trị, rồi gỡ ra ngay sau đó. Một số app (game DirectX/OpenGL, Electron,
+    ''' Chromium vẽ caret riêng...) không expose caret chuẩn của Windows nên
+    ''' hàm này có thể không lấy được — khi đó rơi về vị trí con trỏ chuột
+    ''' hiện tại làm phương án dự phòng thay vì báo lỗi.
+    ''' </summary>
+    Private Function GetCaretScreenPos() As Point
+        Try
+            Dim fgWnd As IntPtr = Win32.GetForegroundWindow()
+            Dim pid As UInteger = 0
+            Dim foreignThread As UInteger = Win32.GetWindowThreadProcessId(fgWnd, pid)
+            Dim currentThread As UInteger = Win32.GetCurrentThreadId()
+
+            If foreignThread <> 0 AndAlso foreignThread <> currentThread Then
+                If Win32.AttachThreadInput(currentThread, foreignThread, True) Then
+                    Try
+                        Dim pt As New Win32.POINTAPI()
+                        If Win32.GetCaretPos(pt) Then
+                            Win32.ClientToScreen(fgWnd, pt)
+                            Return New Point(pt.X, pt.Y)
+                        End If
+                    Finally
+                        Win32.AttachThreadInput(currentThread, foreignThread, False)
+                    End Try
+                End If
+            End If
+        Catch
+        End Try
+        Return Cursor.Position
+    End Function
 #End Region
 
 #Region "Form / Tray Events"
@@ -882,10 +1150,15 @@ Public Class MainForm
 
     Private Sub FlushBuffer(clearBuf As Boolean)
         If _buf.Length = 0 Then Return
+        Dim finishedSyllable As String = _buf.ToString()
         If clearBuf Then
             _buf.Clear()
             _lastToneKey = Chr(0)
         End If
+        ' Âm tiết vừa gõ xong (gặp dấu cách/Enter/di chuyển con trỏ...) → kiểm
+        ' tra chính tả. Đặt SAU khi clear để không làm chậm/ảnh hưởng buffer
+        ' đang gõ nếu việc kiểm tra có lỗi phát sinh.
+        CheckAndWarnSpelling(finishedSyllable)
     End Sub
 
     Private Sub HandleKeyPress(sender As Object, e As KeyPressEventArgs)
@@ -1796,6 +2069,90 @@ Public Class FrmConvert
     Private Sub OnClearClick(sender As Object, e As EventArgs)
         txtInput.Clear()
         txtOutput.Clear()
+    End Sub
+End Class
+
+' ════════════════════════════════════════════════════════════
+'  Popup cảnh báo gõ sai chính tả/dấu
+'  QUAN TRỌNG: form này KHÔNG được cướp focus khỏi cửa sổ đang gõ, nếu
+'  không sẽ làm gián đoạn việc nhập liệu (kể cả game). Đạt được bằng:
+'   - WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW trong CreateParams
+'   - ShowWithoutActivation = True
+'   - Hiện bằng ShowWindow(SW_SHOWNOACTIVATE) thay vì Form.Show()
+' ════════════════════════════════════════════════════════════
+Public Class SpellWarningPopup
+    Inherits Form
+
+    Private lbl As Label
+    Private hideTimer As Timer
+
+    Protected Overrides ReadOnly Property CreateParams As CreateParams
+        Get
+            Dim cp As CreateParams = MyBase.CreateParams
+            Const WS_EX_NOACTIVATE As Integer = &H8000000
+            Const WS_EX_TOOLWINDOW As Integer = &H80
+            cp.ExStyle = cp.ExStyle Or WS_EX_NOACTIVATE Or WS_EX_TOOLWINDOW
+            Return cp
+        End Get
+    End Property
+
+    Protected Overrides ReadOnly Property ShowWithoutActivation As Boolean
+        Get
+            Return True
+        End Get
+    End Property
+
+    Public Sub New()
+        Me.FormBorderStyle = FormBorderStyle.None
+        Me.ShowInTaskbar = False
+        Me.TopMost = True
+        Me.StartPosition = FormStartPosition.Manual
+        Me.BackColor = Color.FromArgb(255, 249, 224, 224)
+
+        lbl = New Label()
+        lbl.AutoSize = True
+        lbl.Font = New Font("Segoe UI", 9)
+        lbl.ForeColor = Color.FromArgb(150, 20, 20)
+        lbl.Location = New Point(6, 4)
+        Me.Controls.Add(lbl)
+
+        hideTimer = New Timer()
+        hideTimer.Interval = 1400
+        AddHandler hideTimer.Tick, AddressOf OnHideTick
+    End Sub
+
+    Private Sub OnHideTick(sender As Object, e As EventArgs)
+        hideTimer.Stop()
+        Me.Hide()
+    End Sub
+
+    ''' <summary>Hiện cảnh báo cho 1 âm tiết, định vị ngay dưới điểm gõ (dịch
+    ''' vào trong nếu tràn mép màn hình), tự ẩn sau ~1.4 giây.
+    ''' suggestion = Nothing/rỗng → cảnh báo "sai chính tả" (đỏ, từ điển).
+    ''' suggestion có giá trị → gợi ý "có thể ý bạn là..." (xanh, model ngữ cảnh).</summary>
+    Public Sub ShowWarning(word As String, suggestion As String, screenPos As Point)
+        If String.IsNullOrEmpty(suggestion) Then
+            lbl.Text = "⚠ """ & word & """ có thể sai dấu/chính tả"
+            Me.BackColor = Color.FromArgb(255, 249, 224, 224)
+            lbl.ForeColor = Color.FromArgb(150, 20, 20)
+        Else
+            lbl.Text = "💡 Ý bạn là """ & suggestion & """ thay vì """ & word & """?"
+            Me.BackColor = Color.FromArgb(255, 222, 236, 249)
+            lbl.ForeColor = Color.FromArgb(20, 70, 140)
+        End If
+        Me.Size = New Size(lbl.PreferredWidth + 14, lbl.PreferredHeight + 8)
+
+        Dim area As Rectangle = Screen.FromPoint(screenPos).WorkingArea
+        Dim x As Integer = screenPos.X
+        Dim y As Integer = screenPos.Y + 20
+        If x + Me.Width > area.Right Then x = area.Right - Me.Width
+        If x < area.Left Then x = area.Left
+        If y + Me.Height > area.Bottom Then y = screenPos.Y - Me.Height - 4
+        Me.Location = New Point(x, y)
+
+        Win32.ShowWindow(Me.Handle, Win32.SW_SHOWNOACTIVATE)
+        hideTimer.Stop()
+        hideTimer.Start()
     End Sub
 End Class
 
