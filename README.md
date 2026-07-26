@@ -1,5 +1,9 @@
 # 2CongLC-IME
 
+<p align="center">
+  <img src="VietnameseIME-logo.png" width="800">
+</p>
+
 Bộ gõ tiếng Việt cho Windows, chạy nền (system tray), gõ được ở **mọi ứng dụng**
 kể cả game — không cần cài driver. Build ra bản tự chứa (self-contained) nên
 người dùng cuối cũng không cần cài .NET runtime riêng.
