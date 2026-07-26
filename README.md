@@ -1,7 +1,7 @@
 # 2CongLC-IME
 
 <p align="center">
-  <img src="VietnameseIME-logo.png" width="800">
+  <img src="VietnameseIME-logo.png" width="320">
 </p>
 
 Bộ gõ tiếng Việt cho Windows, chạy nền (system tray), gõ được ở **mọi ứng dụng**
