@@ -8,9 +8,14 @@
     <AssemblyName>VietnameseIME</AssemblyName>
     <OptionStrict>On</OptionStrict>
     <RuntimeIdentifier>win-x86</RuntimeIdentifier>
-    <SelfContained>true</SelfContained>
     <Nullable>Disable</Nullable>
   </PropertyGroup>
+
+  <!--
+    SelfContained khong khai bao co dinh o day - moi build script
+    (build-singlefile.bat / build-framework-dependent.bat) tu truyen co
+    self-contained true hoac false rieng, vi 2 cach build co dac tinh khac nhau.
+  -->
 
   <!--
     ONNX Runtime: chỉ cần khai báo PackageReference, dotnet tự tải cả DLL

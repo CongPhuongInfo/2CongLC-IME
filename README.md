@@ -38,6 +38,8 @@ lưu trong buffer riêng (`_buf`).
 
 ```
 2CongLC-IME-main/
+├── build-singlefile.bat          ← build ra 1 file .exe duy nhất (self-contained)
+├── build-framework-dependent.bat ← build gọn, cần cài .NET 9 Desktop Runtime để chạy
 ├── src/                          ← mã nguồn + project (.NET 9 SDK-style)
 │   ├── VietnameseIME.vbproj         Project file — khai báo target, package
 │   │                                ONNX Runtime, và file nào copy/nhúng
@@ -49,50 +51,47 @@ lưu trong buffer riêng (`_buf`).
 │   ├── vietnamese_syllables.txt     Từ điển 7.244 âm tiết (nhúng vào exe)
 │   ├── vn_context_lm.onnx           Model ONNX ngữ cảnh đã train (copy ra output)
 │   └── vn_vocab.txt                 Vocab tương ứng với model (copy ra output)
-├── bin/                          ← nơi build.bat xuất kết quả (VietnameseIME.exe + DLL)
-│   └── build.bat                    Build bằng `dotnet publish` — 1 lệnh duy nhất
+├── bin/                          ← nơi 2 script trên xuất kết quả cuối cùng
 └── colab/                        ← để train tiếp model ONNX
     ├── train_colab.ipynb             Sổ tay Colab train tiếp (warm-start)
     ├── vocab.json                    Vocab dạng JSON (dùng trong Colab)
     └── nplm.pt                       Checkpoint PyTorch để train tiếp
 ```
 
-`src\bin\` và `src\obj\` là thư mục tạm do `dotnet` tự sinh ra lúc build —
-không commit vào git (đã có trong `.gitignore`), không phải chỗ lấy kết quả
-(kết quả cuối nằm ở `bin\` ngoài cùng, do `build.bat` chỉ định).
+Lúc build, `dotnet` sẽ **luôn tự tạo thêm** `src\bin\` và `src\obj\` — đây là
+thư mục tạm/trung gian mặc định của mọi project .NET, không phải kết quả cuối
+(2 script tự xoá chúng sau khi build xong). Kết quả thật để chạy nằm ở `bin\`
+ngoài cùng.
 
 ## Build
 
-Yêu cầu cài **.NET 9 SDK** (khác với bản trước chỉ cần .NET Framework có sẵn
-trên Windows) — tải tại https://dotnet.microsoft.com/download/dotnet/9.0.
-Chỉ cần cho máy **build**; máy chạy IME sau khi build xong không cần cài gì
-thêm (xem bên dưới).
+Yêu cầu cài **.NET 9 SDK** để build (khác với bản trước chỉ cần .NET Framework
+có sẵn trên Windows) — tải tại https://dotnet.microsoft.com/download/dotnet/9.0.
 
-```
-cd bin
-build.bat
-```
+Có **2 cách**, chọn 1 tuỳ nhu cầu — cả 2 đều xuất `VietnameseIME.exe` vào `bin\`:
 
-`build.bat` chạy `dotnet publish` nhắm `win-x86`, tự động:
-- Tải và tham chiếu `Microsoft.ML.OnnxRuntime` qua NuGet (cả managed DLL lẫn
-  native `onnxruntime.dll`) — không còn cần `setup_onnx.bat`, không còn cần
-  tự săn `netstandard.dll` hay dò thư mục `lib\`/`runtimes\` thủ công như bản
-  build bằng `vbc.exe` trước đây.
-- Nhúng `vietnamese_syllables.txt` vào exe làm resource.
-- Copy `vn_context_lm.onnx` + `vn_vocab.txt` ra `bin\` cùng exe.
-- Đóng gói self-contained (`--self-contained` khai báo sẵn trong `.vbproj`) —
-  exe chạy được trên máy khác dù máy đó không cài .NET, giữ đúng tinh thần
-  "không cần cài gì thêm" của bản gốc.
+**`build-singlefile.bat`** — build ra **đúng 1 file `.exe`** (đã nén sẵn .NET
+runtime bên trong), máy chạy IME **không cần cài gì thêm** — giữ đúng tinh
+thần "gọn nhẹ, không phụ thuộc" của bản gốc dùng `vbc.exe`. Đánh đổi: file to
+hơn (runtime nhúng sẵn), và vẫn có 1 file `onnxruntime.dll` nằm rời bên cạnh
+(native runtime của ONNX, không nhét vào file gộp được).
+
+**`build-framework-dependent.bat`** — thư mục output gọn (chỉ vài file: exe +
+DLL của project + DLL ONNX), nhưng **máy chạy IME phải tự cài trước** [.NET 9
+Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) (bản nhẹ
+hơn SDK, chỉ để chạy chứ không build được). Hợp nếu bạn sẽ cài sẵn runtime
+trên các máy định dùng, hoặc muốn thư mục build gọn để kiểm tra nhanh.
+
+Cả 2 script đều:
+- Tự tải `Microsoft.ML.OnnxRuntime` qua NuGet (managed + native DLL) — không
+  còn cần `setup_onnx.bat`, không còn cần tự săn `netstandard.dll` hay dò
+  thư mục `lib\`/`runtimes\` thủ công như bản build bằng `vbc.exe` trước đây.
+- Nhúng `vietnamese_syllables.txt` vào exe làm resource, copy
+  `vn_context_lm.onnx` + `vn_vocab.txt` ra `bin\` cùng exe.
+- Tự dọn `src\bin\`/`src\obj\` sau khi build xong.
 
 Lần build đầu có thể mất vài phút (dotnet tải NuGet packages về cache); các
 lần sau nhanh hơn nhiều.
-
-**Vì sao đổi cách build:** bản cũ dùng `vbc.exe` (built-in Windows, không cần
-cài gì) nhưng gặp hàng loạt vướng mắc khi thêm ONNX Runtime — thiếu
-`netstandard.dll` facade, gói NuGet tách managed/native, dò đường dẫn `lib\`
-thủ công... .NET SDK xử lý tất cả tự động qua `PackageReference`, đổi lại là
-phải cài SDK để build (nhưng không cần cho người dùng cuối, nhờ
-self-contained publish).
 
 ## Giới hạn cần biết
 
@@ -163,3 +162,8 @@ CongPhuongInfo@Gmail.com — dự án mã nguồn mở, thoải mái sửa theo 
   giờ chỉ cần khai báo `PackageReference` — hết mọi vướng mắc về
   `netstandard.dll`, gói NuGet tách managed/native, dò đường dẫn `lib\` thủ
   công. Build ra bản self-contained, người dùng cuối không cần cài .NET.
+- **25/07/2026** — Tách build.bat thành 2 script đặt ở thư mục gốc:
+  `build-singlefile.bat` (1 file .exe duy nhất, self-contained) và
+  `build-framework-dependent.bat` (thư mục gọn, cần cài .NET 9 Desktop
+  Runtime để chạy). Sửa lỗi XML comment chứa `--` (không hợp lệ trong XML)
+  gây lỗi parse `.vbproj`.

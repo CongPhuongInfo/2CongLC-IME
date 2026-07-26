@@ -1,0 +1,79 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v9.0/win-x86",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v9.0": {},
+    ".NETCoreApp,Version=v9.0/win-x86": {
+      "VietnameseIME/1.0.0": {
+        "dependencies": {
+          "Microsoft.ML.OnnxRuntime": "1.20.1"
+        },
+        "runtime": {
+          "VietnameseIME.dll": {}
+        }
+      },
+      "Microsoft.ML.OnnxRuntime/1.20.1": {
+        "dependencies": {
+          "Microsoft.ML.OnnxRuntime.Managed": "1.20.1"
+        },
+        "native": {
+          "runtimes/win-x86/native/onnxruntime.dll": {
+            "fileVersion": "1.20.24.1119"
+          },
+          "runtimes/win-x86/native/onnxruntime.lib": {
+            "fileVersion": "0.0.0.0"
+          },
+          "runtimes/win-x86/native/onnxruntime_providers_shared.dll": {
+            "fileVersion": "1.20.24.1119"
+          },
+          "runtimes/win-x86/native/onnxruntime_providers_shared.lib": {
+            "fileVersion": "0.0.0.0"
+          }
+        }
+      },
+      "Microsoft.ML.OnnxRuntime.Managed/1.20.1": {
+        "dependencies": {
+          "System.Memory": "4.5.5"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.ML.OnnxRuntime.dll": {
+            "assemblyVersion": "1.20.1.0",
+            "fileVersion": "1.20.1.0"
+          }
+        }
+      },
+      "System.Memory/4.5.5": {}
+    }
+  },
+  "libraries": {
+    "VietnameseIME/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Microsoft.ML.OnnxRuntime/1.20.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-NzUD79BC6R7TKROLyB3XCzXTpbNZ1YfOdVbult7hoFvd/xyRecOMiRO5HTzkPXvaFlcvZ91+WNCiroAPzUE7Dw==",
+      "path": "microsoft.ml.onnxruntime/1.20.1",
+      "hashPath": "microsoft.ml.onnxruntime.1.20.1.nupkg.sha512"
+    },
+    "Microsoft.ML.OnnxRuntime.Managed/1.20.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-+EVcEcKdq3gkw6iu8TYl2coJxfPnMi1YQc6eZ80BGNlw6mbBCxNGe6h4udDCwENYWsXFvYjoBc6412t40tl4ew==",
+      "path": "microsoft.ml.onnxruntime.managed/1.20.1",
+      "hashPath": "microsoft.ml.onnxruntime.managed.1.20.1.nupkg.sha512"
+    },
+    "System.Memory/4.5.5": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-XIWiDvKPXaTveaB7HVganDlOCRoj03l+jrwNvcge/t8vhGYKvqV+dMv6G4SAX2NoNmN0wZfVPTAlFwZcZvVOUw==",
+      "path": "system.memory/4.5.5",
+      "hashPath": "system.memory.4.5.5.nupkg.sha512"
+    }
+  }
+}
